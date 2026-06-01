@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(ollama *)",
+      "PowerShell(Test-Path *)"
+    ]
+  }
+}

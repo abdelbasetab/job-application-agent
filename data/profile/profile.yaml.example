@@ -1,0 +1,47 @@
+# Copy this file to `profile.yaml` and fill in your real details.
+# Sprint 2 will pick this up automatically; for Sprint 1 the CLI uses a
+# baked-in demo profile in src/job_agent/main.py.
+
+name: "Abdelbaset Abidi"
+headline: "AI Engineering Student @ Westfälische Hochschule"
+email: "adessadess1990@gmail.com"
+phone: null
+location: "Gelsenkirchen, DE"
+
+languages:
+  de: "C1"
+  en: "C1"
+  ar: "Native"
+
+skills:
+  - python
+  - sql
+  - git
+  - llms
+  - rag
+  - machine learning
+  - chromadb
+  - pydantic
+
+experience:
+  - role: "AI Engineering Coursework"
+    company: "Westfälische Hochschule"
+    start: "2025-10"
+    end: null
+    summary: "Building a multi-agent job-application system with CrewAI + Anthropic Claude."
+    skills_used: [python, llms, rag, crewai]
+
+education:
+  - degree: "B.Sc."
+    institution: "Westfälische Hochschule"
+    field: "Computer Science / AI"
+    start: "2023-10"
+    end: null
+    grade: null
+
+preferences:
+  locations: ["Gelsenkirchen", "Essen", "Dortmund", "Remote"]
+  remote_ok: true
+  employment_types: ["working-student", "internship"]
+  min_salary: null
+  excluded_companies: []
