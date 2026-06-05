@@ -203,6 +203,7 @@ def ba_jobsuche_search(
     headers = {
         "User-Agent": _USER_AGENT,
         "Accept": "application/json",
+        "X-API-Key": settings.ba_jobsuche_api_key,
     }
     log.info("[ba-jobsuche] GET %s was=%r wo=%r size=%d", url, query, location, limit)
 

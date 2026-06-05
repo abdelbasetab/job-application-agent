@@ -34,6 +34,9 @@ class Settings:
         "BA_JOBSUCHE_BASE_URL",
         "https://rest.arbeitsagentur.de/jobboerse/jobsuche-service/pc/v4",
     )
+    # Public, fixed API key the BA-Jobsuche API requires on every request.
+    # Same value for everyone; without it the server returns 403.
+    ba_jobsuche_api_key: str = os.getenv("BA_JOBSUCHE_API_KEY", "jobboerse-jobsuche")
 
     # Storage
     sqlite_path: str = os.getenv("SQLITE_PATH", "./data/job_agent.db")
