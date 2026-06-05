@@ -1,27 +1,64 @@
-"""Scout agent — discovers and normalizes job postings.
+"""Scout agent — discovers real job postings via Adzuna + BA-Jobsuche.
 
-Sprint 1 close-out: the Scout asks the configured LLM to invent realistic-but-
-fictional German job postings. Sprint 2 wires the real Adzuna and BA-Jobsuche
-tools in their place. The function signature is the only stable contract.
+Sprint 2: Scout no longer fabricates jobs. It exposes the two job-search
+APIs as CrewAI tools and asks the LLM to call them, combine, and dedup.
 
-The CrewAI LLM is built lazily via ``_get_llm()`` so importing this module does
-not require network access (important for offline pytest runs).
+The local LLM (qwen2.5:7b via Ollama) only orchestrates — it MUST NOT
+invent postings. If both APIs return empty, run_scout raises so callers
+fail loudly instead of silently producing nothing.
 """
 
 from __future__ import annotations
 
 import json
 from functools import lru_cache
+from typing import Any
 
 from crewai import LLM, Agent, Crew, Task
+from crewai.tools import tool
 
 from job_agent.schemas import JobPosting, UserProfile
+from job_agent.tools.job_search import adzuna_search, ba_jobsuche_search
 from job_agent.utils.config import settings
 from job_agent.utils.logging import get_logger
 
 log = get_logger(__name__)
 
 
+# ────────────────────────────────────────────────────────────────────────────
+# CrewAI tools — thin wrappers around tools/job_search.py
+# ────────────────────────────────────────────────────────────────────────────
+@tool("adzuna_search")
+def adzuna_tool(query: str, location: str = "Germany", limit: int = 10) -> str:
+    """Search Adzuna for open positions in Germany.
+
+    Returns a JSON array of JobPosting objects (may be empty).
+    Args:
+        query: Free-text search term (e.g. "Werkstudent KI", "Data Engineer").
+        location: City or region; defaults to all of Germany.
+        limit: Max number of postings to return (1-25).
+    """
+    postings = adzuna_search(query=query, location=location, limit=limit)
+    return json.dumps([p.model_dump(mode="json") for p in postings], default=str)
+
+
+@tool("ba_jobsuche_search")
+def ba_tool(query: str, location: str = "", limit: int = 10) -> str:
+    """Search the German Bundesagentur für Arbeit Jobbörse.
+
+    Returns a JSON array of JobPosting objects (may be empty).
+    Args:
+        query: Free-text search term; German preferred.
+        location: City name, or empty for nationwide.
+        limit: Max number of postings to return (1-25).
+    """
+    postings = ba_jobsuche_search(query=query, location=location, limit=limit)
+    return json.dumps([p.model_dump(mode="json") for p in postings], default=str)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# LLM construction
+# ────────────────────────────────────────────────────────────────────────────
 @lru_cache(maxsize=1)
 def _get_llm() -> LLM:
     """Build the CrewAI LLM lazily, switching on settings.llm_provider."""
@@ -36,15 +73,9 @@ def _get_llm() -> LLM:
             temperature=settings.llm_temperature,
         )
     if provider == "anthropic":
-        return LLM(
-            model=f"anthropic/{model}",
-            temperature=settings.llm_temperature,
-        )
+        return LLM(model=f"anthropic/{model}", temperature=settings.llm_temperature)
     if provider == "groq":
-        return LLM(
-            model=f"groq/{model}",
-            temperature=settings.llm_temperature,
-        )
+        return LLM(model=f"groq/{model}", temperature=settings.llm_temperature)
     raise ValueError(
         f"Unknown LLM_PROVIDER='{settings.llm_provider}'. "
         "Expected one of: ollama, anthropic, groq."
@@ -55,33 +86,75 @@ def _build_scout_agent() -> Agent:
     return Agent(
         role="Job Scout",
         goal=(
-            "Find job postings in Germany that match the candidate's skills, "
-            "preferred locations, and employment type."
+            "Find real job postings in Germany that match the candidate by "
+            "calling the available search tools and combining their results."
         ),
         backstory=(
             "You are a meticulous researcher of the German tech job market. "
-            "You know Werkstudent, Praktikum, and junior roles well. "
-            "You NEVER invent skill requirements — if the source doesn't list it, "
-            "it does not go into 'requirements'. An empty list is better than a wrong one."
+            "You ONLY return jobs that came back from one of the tools — you "
+            "NEVER invent postings, requirements, or companies. If a tool "
+            "returns nothing, report nothing for that source."
         ),
+        tools=[adzuna_tool, ba_tool],
         llm=_get_llm(),
         verbose=False,
     )
 
 
-def run_scout(profile: UserProfile, query: str | None = None, limit: int = 5) -> list[JobPosting]:
-    """Discover job postings for a given profile using a CrewAI agent.
+# ────────────────────────────────────────────────────────────────────────────
+# Output parsing & dedup
+# ────────────────────────────────────────────────────────────────────────────
+def _parse_postings(raw: str) -> list[dict[str, Any]]:
+    """Strip Markdown fences, JSON-parse, unwrap common envelope keys."""
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        log.error("[scout] JSON parse error: %s\nRaw output:\n%s", exc, raw[:500])
+        return []
+    if isinstance(data, dict):
+        for key in ("jobs", "postings", "data", "results"):
+            if key in data and isinstance(data[key], list):
+                data = data[key]
+                break
+    return data if isinstance(data, list) else []
+
+
+def _dedup(postings: list[JobPosting]) -> list[JobPosting]:
+    """Stable-order dedup by JobPosting.id."""
+    seen: set[str] = set()
+    out: list[JobPosting] = []
+    for p in postings:
+        if p.id in seen:
+            continue
+        seen.add(p.id)
+        out.append(p)
+    return out
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Public API
+# ────────────────────────────────────────────────────────────────────────────
+def run_scout(
+    profile: UserProfile, query: str | None = None, limit: int = 5
+) -> list[JobPosting]:
+    """Discover real job postings for the candidate via CrewAI + tools.
 
     Args:
-        profile: The candidate's structured profile.
-        query: Optional free-text search hint (e.g. "Werkstudent KI Berlin").
-        limit: Max number of postings to return.
+        profile: Candidate's structured profile.
+        query: Optional free-text search hint (falls back to top-3 skills).
+        limit: Max postings to return after dedup.
 
     Returns:
-        A list of validated JobPosting objects (max `limit`).
+        Validated, deduplicated JobPosting list (length ≤ limit).
+
+    Raises:
+        RuntimeError: when both job sources fail or return nothing usable.
     """
     log.info(
-        "[scout] starting CrewAI run profile=%s provider=%s model=%s limit=%d",
+        "[scout] start profile=%s provider=%s model=%s limit=%d",
         profile.name,
         settings.llm_provider,
         settings.llm_model,
@@ -89,70 +162,52 @@ def run_scout(profile: UserProfile, query: str | None = None, limit: int = 5) ->
     )
 
     scout_agent = _build_scout_agent()
-    search_hint = f" Use the search hint: '{query}'." if query else ""
+    search_hint = query or " ".join(profile.skills[:3])
+    per_source = max(limit, 5)
+
     task = Task(
         description=(
-            f"Create {limit} realistic German tech job postings that match this candidate.\n"
-            f"Candidate profile (JSON):\n{{profile_json}}\n"
-            f"{search_hint}\n\n"
+            f"Find up to {limit} open job postings for this candidate in Germany.\n"
+            f"Candidate profile (JSON):\n{{profile_json}}\n\n"
+            f"Suggested search query: '{search_hint}'\n\n"
+            "Process:\n"
+            f"1. Call adzuna_search(query='{search_hint}', "
+            f"location='Germany', limit={per_source}).\n"
+            f"2. Call ba_jobsuche_search(query='{search_hint}', "
+            f"location='', limit={per_source}).\n"
+            "3. Combine the JSON arrays from both calls.\n"
+            "4. Remove duplicates by the 'id' field.\n"
+            f"5. Return the first {limit} entries as a JSON array.\n\n"
             "Rules:\n"
-            "- Jobs must be in Germany (or remote from DE).\n"
-            "- Employment types must fit the candidate's preferences.\n"
-            "- Use realistic German company names and real German cities.\n"
-            "- Each posting's 'id' must be a unique string like 'scout-001', 'scout-002', etc.\n"
-            "- Set 'source' to 'manual' and 'source_id' equal to 'id'.\n"
-            "- ALL urls must start with 'https://'.\n"
-            "- 'requirements' and 'nice_to_have' must be lowercase strings.\n"
-            "- Do NOT invent requirements that aren't in your description.\n\n"
-            "Output: a JSON array (no markdown, no explanation) — only the raw JSON array."
+            "- Output ONLY the raw JSON array — no Markdown, no commentary.\n"
+            "- Each entry MUST come from a tool result. Never invent postings.\n"
+            "- Preserve every field from the tool output exactly as returned."
         ),
         expected_output=(
-            f"A JSON array of exactly {limit} objects, each matching this schema:\n"
-            "{\n"
-            '  "id": "scout-001",\n'
-            '  "source": "manual",\n'
-            '  "source_id": "scout-001",\n'
-            '  "url": "https://example-company.de/jobs/123",\n'
-            '  "title": "Werkstudent KI (m/w/d)",\n'
-            '  "company": "Beispiel GmbH",\n'
-            '  "location": "Dortmund",\n'
-            '  "description": "...",\n'
-            '  "requirements_raw": "Python, Git",\n'
-            '  "requirements": ["python", "git"],\n'
-            '  "nice_to_have": ["docker"],\n'
-            '  "employment_type": "working-student",\n'
-            '  "remote": false\n'
-            "}"
+            f"A JSON array of at most {limit} JobPosting objects, taken "
+            "verbatim from the search tool results."
         ),
         agent=scout_agent,
     )
 
     crew = Crew(agents=[scout_agent], tasks=[task], verbose=False)
     crew_output = crew.kickoff(inputs={"profile_json": profile.model_dump_json()})
-    raw: str = crew_output.raw
 
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[-1]
-        raw = raw.rsplit("```", 1)[0]
-    raw = raw.strip()
+    raw_items = _parse_postings(crew_output.raw)
+    postings: list[JobPosting] = []
+    for item in raw_items:
+        try:
+            postings.append(JobPosting.model_validate(item))
+        except Exception as exc:
+            log.warning("[scout] dropping invalid posting from LLM output: %s", exc)
 
-    # Some local LLMs wrap the array in an object like {"jobs": [...]}.
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        log.error("[scout] JSON parse error: %s\nRaw output:\n%s", exc, raw)
-        raise
-
-    if isinstance(data, dict):
-        for key in ("jobs", "postings", "data", "results"):
-            if key in data and isinstance(data[key], list):
-                data = data[key]
-                break
-
-    if not isinstance(data, list):
-        raise ValueError(f"[scout] expected a JSON array, got {type(data).__name__}")
-
-    postings = [JobPosting.model_validate(item) for item in data]
+    postings = _dedup(postings)
     log.info("[scout] validated %d postings", len(postings))
+
+    if not postings:
+        raise RuntimeError(
+            "Scout produced no postings — both Adzuna and BA-Jobsuche returned "
+            "empty or unusable results. Check API credentials and network."
+        )
+
     return postings[:limit]

@@ -8,6 +8,8 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from job_agent.agents.demo_scout import run_demo_scout
+from job_agent.agents.scout import run_scout
 from job_agent.memory.store import Store
 from job_agent.pipeline import run_pipeline
 from job_agent.schemas import UserProfile
@@ -72,11 +74,36 @@ def run_pipeline_cmd(
     ),
     threshold: float = typer.Option(0.5, help="Min match score to draft an application."),
     limit: int = typer.Option(5, help="Max jobs Scout should return."),
+    demo: bool = typer.Option(
+        False,
+        "--demo",
+        help="Use stable offline demo jobs instead of live APIs/LLM.",
+    ),
+    db_path: str | None = typer.Option(
+        None,
+        "--db-path",
+        help="Override SQLite path. Useful for a separate demo database.",
+    ),
+    reset_demo_db: bool = typer.Option(
+        False,
+        "--reset-demo-db",
+        help="Delete the selected demo DB before running. Only allowed with --demo.",
+    ),
 ) -> None:
     """Run the Scout → Matcher → Writer → Tracker pipeline end-to-end."""
     profile = _demo_profile()
-    Path(settings.sqlite_path).parent.mkdir(parents=True, exist_ok=True)
-    store = Store(settings.sqlite_path)
+    selected_db_path = db_path or (
+        "./data/demo_job_agent.db" if demo else settings.sqlite_path
+    )
+    if reset_demo_db and not demo:
+        raise typer.BadParameter("--reset-demo-db can only be used together with --demo")
+    if reset_demo_db:
+        demo_db = Path(selected_db_path)
+        if demo_db.exists():
+            demo_db.unlink()
+
+    Path(selected_db_path).parent.mkdir(parents=True, exist_ok=True)
+    store = Store(selected_db_path)
 
     result = run_pipeline(
         profile=profile,
@@ -84,6 +111,7 @@ def run_pipeline_cmd(
         query=query,
         match_threshold=threshold,
         job_limit=limit,
+        scout_runner=run_demo_scout if demo else run_scout,
     )
 
     # ----- pretty summary -----
@@ -93,7 +121,7 @@ def run_pipeline_cmd(
     table.add_column("Score", justify="right")
     table.add_column("Status")
     by_id = {j.id: j for j in result.jobs}
-    statuses = {s.job_id: s for s in result.statuses}
+    statuses = {s.job_id: s for s in store.all_status()}
 
     for m in result.matches:
         job = by_id[m.job_id]
@@ -107,16 +135,30 @@ def run_pipeline_cmd(
 
     console.print(table)
     console.print(
-        f"\n[bold green]OK[/bold green] State written to [cyan]{settings.sqlite_path}[/cyan]"
+        f"\n[bold green]OK[/bold green] State written to [cyan]{selected_db_path}[/cyan]"
     )
 
     store.close()
 
 
 @app.command("show-applications")
-def show_applications_cmd() -> None:
+def show_applications_cmd(
+    demo: bool = typer.Option(
+        False,
+        "--demo",
+        help="Read from the offline demo database.",
+    ),
+    db_path: str | None = typer.Option(
+        None,
+        "--db-path",
+        help="Override SQLite path.",
+    ),
+) -> None:
     """Print every drafted application currently in the SQLite store."""
-    store = Store(settings.sqlite_path)
+    selected_db_path = db_path or (
+        "./data/demo_job_agent.db" if demo else settings.sqlite_path
+    )
+    store = Store(selected_db_path)
     for status in store.all_status():
         app_doc = store.get_application(status.job_id)
         console.rule(f"[bold]{status.job_id}[/bold] — {status.status}")

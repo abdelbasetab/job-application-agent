@@ -1,123 +1,101 @@
 # Job Application Agent
 
-A multi-agent system that automates the German student job search pipeline:
-**find → match → draft → track**.
+A multi-agent system for the German student job-search pipeline:
+**find -> match -> draft -> track**.
 
 Built as the portfolio project for the *AI Agents & RAG Systems* module
-(Westfälische Hochschule, Prof. Dr. Gleim).
+(Westfaelische Hochschule, Prof. Dr. Gleim).
 
----
+## What It Does
 
-## What it does
+| Agent | Current role |
+| --- | --- |
+| Scout | Finds job postings via Adzuna + BA-Jobsuche, with an offline demo scout for stable presentations |
+| Matcher | Scores postings against the candidate profile with deterministic skill overlap |
+| Writer | Drafts a German cover letter from a template |
+| Tracker | Persists jobs, drafted applications, and status records in SQLite |
 
-| Agent       | Role                                                                    |
-| ----------- | ----------------------------------------------------------------------- |
-| **Scout**   | Discovers relevant job postings (Adzuna + Bundesagentur für Arbeit API) |
-| **Matcher** | Scores each posting against the user's profile (skills, prefs, hard reqs) |
-| **Writer**  | Drafts a tailored cover letter + CV adjustments for matches above threshold |
-| **Tracker** | Persists every application's status (`draft → submitted → interview …`) |
+All handoffs use typed Pydantic schemas instead of freeform strings.
 
-The agents talk to each other through **typed Pydantic schemas** — there is no
-"freeform string" handoff. Every transition is validated.
+## Current Status
 
----
+Sprint 2 is implemented as code, with one important demo distinction:
 
-## Sprint plan
+- Offline demo path is stable and does not need internet, API keys, or Ollama.
+- Live Scout path is implemented, but depends on external API availability,
+  Adzuna credentials, and the configured LLM.
+- Matcher and Writer are still Sprint-1-style deterministic/template logic.
+  LLM-backed matching and writing are planned for Sprint 3.
 
-The project is shipped in 5 weekly sprints:
-
-| Sprint | Goal                                                                          |
-| ------ | ----------------------------------------------------------------------------- |
-| **1**  | Tracer bullet: schemas + mock agents end-to-end, repo scaffold, ADRs          |
-| 2      | Scout: real job-board calls (Adzuna + BA-API), normalization, dedup           |
-| 3      | Matcher + Writer: LLM-backed scoring + cover-letter drafting                  |
-| 4      | Tracker + memory: SQLite store, ChromaDB embeddings, no-duplicate guard       |
-| 5      | UI + demo polish: Streamlit dashboard, evaluation set, final pitch artifacts  |
-
-The current state is **Sprint 1** — see `docs/sprint_1_handoff.md`.
-
----
-
-## Quick start
-
-The default provider is **local Ollama** — no API keys, no internet
-required. See [ADR-0004](docs/adr/0004-llm-provider-local-default.md) for
-the rationale (cost, data sovereignty, offline capability).
+## Quick Start
 
 ```bash
-# 1. Install Ollama and pull the default model (one-time, ~4 GB)
-#    Windows / macOS / Linux: https://ollama.com/download
-ollama pull qwen2.5:7b-instruct
-ollama serve                       # starts the daemon on http://localhost:11434
+# Install project dependencies
+uv pip install -e ".[dev]"
 
-# 2. Create a virtual environment
-uv venv && source .venv/bin/activate   # or: python -m venv .venv && .venv\Scripts\activate
+# Run the stable offline Sprint-2 demo
+python -m job_agent.main run-pipeline --demo --reset-demo-db --query "Werkstudent KI" --limit 5 --threshold 0.5
 
-# 3. Install the project
-uv pip install -e ".[dev]"             # or: pip install -e ".[dev]"
+# Show generated draft applications
+python -m job_agent.main show-applications --demo
 
-# 4. Copy the env template (defaults to Ollama — no keys required)
-cp .env.example .env
-
-# 5. Run the end-to-end pipeline
-python -m job_agent.main run-pipeline --limit 3 --threshold 0.5
-
-# 6. Run the offline test suite
+# Run offline tests
 pytest
+```
 
-# Optional — exercise the real Ollama call (requires `ollama serve`):
+The demo command writes to `./data/demo_job_agent.db` by default, so it does
+not mix presentation data with the normal application database.
+
+## Live Scout
+
+The live Scout uses:
+
+- Adzuna: requires `ADZUNA_APP_ID` and `ADZUNA_APP_KEY`
+- BA-Jobsuche: public endpoint, no API key expected
+- CrewAI + configured LLM provider for tool orchestration
+
+Configure `.env` from `.env.example`, then run:
+
+```bash
+python -m job_agent.main run-pipeline --query "Werkstudent KI" --limit 5 --threshold 0.5
 pytest -m integration
 ```
 
-You should see four agents fire in sequence, exchanging Pydantic objects, and
-the run ending with a saved `ApplicationStatus` in `data/job_agent.db`.
+If Adzuna credentials are missing or BA-Jobsuche rejects the request, use the
+offline `--demo` mode for the Sprint review.
 
-### Switching providers
+## Repo Layout
 
-Set `LLM_PROVIDER` in `.env` to one of `ollama` (default), `anthropic`, or
-`groq`, then set the matching `LLM_MODEL` and API key. No code changes
-required.
+```text
+src/job_agent/
+  main.py              Typer CLI entrypoint
+  pipeline.py          Orchestrates Scout -> Matcher -> Writer -> Tracker
+  schemas/             Pydantic contracts between agents
+  agents/              scout.py, demo_scout.py, matcher.py, writer.py, tracker.py
+  tools/               job_search.py live API adapters
+  memory/              store.py SQLite persistence
+  prompts/             Prompt templates for later LLM-backed agents
+  utils/               Config and logging
 
----
-
-## Repo layout
-
-```
-job-application-agent/
-├── src/job_agent/
-│   ├── main.py              # Typer CLI entrypoint
-│   ├── pipeline.py          # Orchestrates the 4-agent flow
-│   ├── schemas/             # Pydantic models — the contracts between agents
-│   ├── agents/              # scout.py (STUB), matcher.py, writer.py, tracker.py
-│   ├── tools/               # job_search.py, file_io.py
-│   ├── memory/              # store.py (SQLite), embeddings.py (ChromaDB, Sprint 4)
-│   ├── prompts/             # *.md prompt templates
-│   └── utils/               # logging, config
-├── tests/                   # pytest suite — schemas + tracer bullet
-├── data/                    # profile.yaml, scraped jobs, drafted applications
-├── docs/
-│   ├── adr/                 # Architecture Decision Records
-│   ├── legal-notes.md       # ToS / GDPR considerations
-│   └── sprint_1_handoff.md  # What's built, what's stubbed, where you plug in Scout
-└── scripts/                 # one-shot helper scripts (e.g. seed_profile.py)
+tests/                 Offline unit tests + integration tests
+docs/                  ADRs, legal notes, Sprint 1 handoff
+data/                  Local profile and SQLite data
 ```
 
----
+## Test Status
 
-## Tech stack
+Expected offline result:
 
-- **Python 3.11+** with **Pydantic v2** for typed data flow
-- **CrewAI** for agent orchestration (other framework options documented in `docs/adr/0002-agent-framework.md`)
-- **Local Ollama** as default LLM (`qwen2.5:7b-instruct`); Anthropic / Groq selectable via `LLM_PROVIDER` — see ADR-0003 and ADR-0004
-- **SQLite** for state, **ChromaDB** for embeddings
-- **Typer** for the CLI, **Rich** for log output
+```bash
+pytest
+# 12 passed, 3 deselected
+```
 
----
+Integration tests are intentionally separate:
 
-## Status: Sprint 1
+```bash
+pytest -m integration
+```
 
-Working: full project scaffold, all schemas, mock Matcher/Writer/Tracker,
-SQLite store, end-to-end tracer bullet, pytest suite, three ADRs.
-
-To do (Sprint 1 close-out): **implement the Scout agent**. See
-`docs/sprint_1_handoff.md` for the exact entry point.
+They hit real services and may fail when credentials or API access are not
+available.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from job_agent.agents.matcher import run_matcher
@@ -37,12 +38,14 @@ def run_pipeline(
     query: str | None = None,
     match_threshold: float = 0.6,
     job_limit: int = 5,
+    scout_runner: Callable[[UserProfile, str | None, int], list[JobPosting]] | None = None,
 ) -> PipelineResult:
     """Run the full Scout → Matcher → Writer → Tracker chain."""
     result = PipelineResult()
+    scout = scout_runner or run_scout
 
     log.info("=== [1/4] Scout ===")
-    result.jobs = run_scout(profile, query=query, limit=job_limit)
+    result.jobs = scout(profile, query, job_limit)
     for job in result.jobs:
         store.save_job(job)
 
@@ -52,7 +55,15 @@ def run_pipeline(
 
     log.info("=== [3/4] Writer (threshold=%.2f) ===", match_threshold)
     qualifying = [m for m in result.matches if m.score >= match_threshold]
-    for match in qualifying:
+    fresh, skipped = [], 0
+    for m in qualifying:
+        if store.job_exists(m.job_id):
+            skipped += 1
+            continue
+        fresh.append(m)
+    if skipped:
+        log.info("[pipeline] skipping %d already-applied jobs", skipped)
+    for match in fresh:
         job = by_id[match.job_id]
         app = run_writer(job=job, match=match, profile=profile)
         result.applications.append(app)

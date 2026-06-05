@@ -83,6 +83,18 @@ class Store:
         ).fetchone()
         return GeneratedApplication.model_validate_json(row[0]) if row else None
 
+    def job_exists(self, job_id: str) -> bool:
+        """True iff this job_id already has a persisted application.
+
+        Used by the pipeline to avoid drafting a second cover letter for a
+        job we've already applied to. Checks the `applications` table — the
+        `jobs` table is irrelevant here, since Scout always re-saves jobs.
+        """
+        row = self._conn.execute(
+            "SELECT 1 FROM applications WHERE job_id = ? LIMIT 1", (job_id,)
+        ).fetchone()
+        return row is not None
+
     # ----- status -----
     def upsert_status(self, status: ApplicationStatus) -> None:
         self._conn.execute(
