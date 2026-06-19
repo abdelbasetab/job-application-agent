@@ -11,5 +11,3 @@ python -m job_agent.main show-applications --demo
 
   python -m job_agent.main run-pipeline --query "Python Berlin" --limit 3 --threshold 0.5
   python -m job_agent.main show-applications
-  pytest
-  optional: Adzuna/BA Live-Test

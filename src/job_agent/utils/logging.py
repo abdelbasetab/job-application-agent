@@ -19,7 +19,9 @@ def _configure() -> None:
     # don't crash on legacy Windows code pages (cp1252).
     for stream in (sys.stdout, sys.stderr):
         try:
-            stream.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+            reconfigure = getattr(stream, "reconfigure", None)
+            if callable(reconfigure):
+                reconfigure(encoding="utf-8")
         except (AttributeError, OSError):
             pass
     console = Console(stderr=True, force_terminal=True, legacy_windows=False)

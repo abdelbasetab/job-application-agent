@@ -6,9 +6,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from job_agent.agents.matcher import run_matcher
-from job_agent.agents.scout import run_scout
 from job_agent.agents.tracker import run_tracker
 from job_agent.agents.writer import run_writer
+from job_agent.memory.profile_index import ProfileVectorStore
 from job_agent.memory.store import Store
 from job_agent.schemas import (
     ApplicationStatus,
@@ -17,9 +17,21 @@ from job_agent.schemas import (
     MatchResult,
     UserProfile,
 )
+from job_agent.utils.config import settings
 from job_agent.utils.logging import get_logger
 
 log = get_logger(__name__)
+
+
+def run_scout(
+    profile: UserProfile,
+    query: str | None = None,
+    limit: int = 5,
+) -> list[JobPosting]:
+    """Lazy live Scout wrapper to avoid importing CrewAI for demo/test paths."""
+    from job_agent.agents.scout import run_scout as live_run_scout
+
+    return live_run_scout(profile, query, limit)
 
 
 @dataclass
@@ -39,20 +51,49 @@ def run_pipeline(
     match_threshold: float = 0.6,
     job_limit: int = 5,
     scout_runner: Callable[[UserProfile, str | None, int], list[JobPosting]] | None = None,
+    use_llm_agents: bool | None = None,
+    use_chroma: bool | None = None,
+    progress: Callable[[str, int], None] | None = None,
 ) -> PipelineResult:
     """Run the full Scout → Matcher → Writer → Tracker chain."""
     result = PipelineResult()
-    scout = scout_runner or run_scout
 
+    def _emit(stage: str, pct: int) -> None:
+        if progress is not None:
+            progress(stage, pct)
+    scout = scout_runner or run_scout
+    llm_enabled = settings.enable_llm_agents if use_llm_agents is None else use_llm_agents
+    chroma_enabled = settings.enable_chroma if use_chroma is None else use_chroma
+    profile_context: list[str] = []
+
+    _emit("Scout: Jobs suchen", 10)
     log.info("=== [1/4] Scout ===")
     result.jobs = scout(profile, query, job_limit)
     for job in result.jobs:
         store.save_job(job)
 
+    if chroma_enabled:
+        index = ProfileVectorStore()
+        index.upsert_profile(profile)
+        context_query = query or " ".join(
+            [job.title for job in result.jobs[:3]]
+            + [skill for skill in profile.skills[:5]]
+        )
+        profile_context = index.query(context_query, top_k=3)
+        log.info("[pipeline] loaded %d profile context snippets", len(profile_context))
+
+    _emit("Matcher: Bewertung", 45)
     log.info("=== [2/4] Matcher ===")
-    result.matches = run_matcher(result.jobs, profile, threshold=match_threshold)
+    result.matches = run_matcher(
+        result.jobs,
+        profile,
+        threshold=match_threshold,
+        use_llm=llm_enabled,
+        profile_context=profile_context,
+    )
     by_id = {j.id: j for j in result.jobs}
 
+    _emit("Writer: Anschreiben", 70)
     log.info("=== [3/4] Writer (threshold=%.2f) ===", match_threshold)
     qualifying = [m for m in result.matches if m.score >= match_threshold]
     fresh, skipped = [], 0
@@ -65,9 +106,16 @@ def run_pipeline(
         log.info("[pipeline] skipping %d already-applied jobs", skipped)
     for match in fresh:
         job = by_id[match.job_id]
-        app = run_writer(job=job, match=match, profile=profile)
+        app = run_writer(
+            job=job,
+            match=match,
+            profile=profile,
+            use_llm=llm_enabled,
+            profile_context=profile_context,
+        )
         result.applications.append(app)
 
+    _emit("Tracker: Speichern", 90)
     log.info("=== [4/4] Tracker ===")
     for app in result.applications:
         status = run_tracker(application=app, store=store, status="draft")
@@ -80,4 +128,5 @@ def run_pipeline(
         len(qualifying),
         len(result.applications),
     )
+    _emit("Fertig", 100)
     return result

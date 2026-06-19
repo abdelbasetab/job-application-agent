@@ -11,6 +11,7 @@ fail loudly instead of silently producing nothing.
 from __future__ import annotations
 
 import json
+import os
 from functools import lru_cache
 from typing import Any
 
@@ -18,7 +19,7 @@ from crewai import LLM, Agent, Crew, Task
 from crewai.tools import tool
 
 from job_agent.schemas import JobPosting, UserProfile
-from job_agent.tools.job_search import adzuna_search, ba_jobsuche_search
+from job_agent.tools.job_search import adzuna_search, ba_jobsuche_search, search_all
 from job_agent.utils.config import settings
 from job_agent.utils.logging import get_logger
 
@@ -52,7 +53,7 @@ def ba_tool(query: str, location: str = "", limit: int = 10) -> str:
         location: City name, or empty for nationwide.
         limit: Max number of postings to return (1-25).
     """
-    postings = ba_jobsuche_search(query=query, location=location, limit=limit)
+    postings = ba_jobsuche_search(query=query, location=location, limit=limit, enrich=True)
     return json.dumps([p.model_dump(mode="json") for p in postings], default=str)
 
 
@@ -72,13 +73,29 @@ def _get_llm() -> LLM:
             base_url=base_url,
             temperature=settings.llm_temperature,
         )
+    if provider in {"openai", "kiconnect"}:
+        # OpenAI-compatible. KI-Connect is a hosted gateway addressed via
+        # LLM_BASE_URL; plain OpenAI uses litellm's built-in default.
+        kwargs: dict[str, Any] = {
+            "model": f"openai/{model}",
+            "temperature": settings.llm_temperature,
+        }
+        if settings.llm_base_url:
+            kwargs["base_url"] = settings.llm_base_url
+            # litellm also picks these up from the environment — set defensively.
+            os.environ.setdefault("OPENAI_API_BASE", settings.llm_base_url)
+            os.environ.setdefault("OPENAI_BASE_URL", settings.llm_base_url)
+        if settings.openai_api_key:
+            kwargs["api_key"] = settings.openai_api_key
+            os.environ.setdefault("OPENAI_API_KEY", settings.openai_api_key)
+        return LLM(**kwargs)
     if provider == "anthropic":
         return LLM(model=f"anthropic/{model}", temperature=settings.llm_temperature)
     if provider == "groq":
         return LLM(model=f"groq/{model}", temperature=settings.llm_temperature)
     raise ValueError(
         f"Unknown LLM_PROVIDER='{settings.llm_provider}'. "
-        "Expected one of: ollama, anthropic, groq."
+        "Expected one of: ollama, openai, kiconnect, anthropic, groq."
     )
 
 
@@ -137,6 +154,27 @@ def _dedup(postings: list[JobPosting]) -> list[JobPosting]:
 # ────────────────────────────────────────────────────────────────────────────
 # Public API
 # ────────────────────────────────────────────────────────────────────────────
+def _direct_scout(
+    profile: UserProfile, query: str | None = None, limit: int = 5
+) -> list[JobPosting]:
+    """Deterministic Scout: query both boards directly, no LLM or tool-calling.
+
+    Used as the fallback when the CrewAI agent fails or the configured gateway
+    cannot do function-calling. Also reachable directly via ``--direct``.
+    """
+    search_hint = query or " ".join(profile.skills[:3])
+    extra = [skill for skill in profile.skills[:3] if skill]
+    postings = search_all(
+        query=search_hint,
+        location="Germany",
+        limit=max(limit, 5),
+        extra_queries=extra,
+        adzuna_pages=2,
+        enrich=True,
+    )
+    return postings[:limit]
+
+
 def run_scout(
     profile: UserProfile, query: str | None = None, limit: int = 5
 ) -> list[JobPosting]:
@@ -161,6 +199,34 @@ def run_scout(
         limit,
     )
 
+    postings: list[JobPosting] = []
+    try:
+        postings = _run_crew_scout(profile, query, limit)
+    except Exception as exc:
+        # Covers LLM/agent init failures (e.g. a model id litellm can't load),
+        # tool-calling not supported, or kickoff errors. Live still works below.
+        log.warning(
+            "[scout] CrewAI agent unavailable (%s) — using direct API search instead",
+            exc,
+        )
+
+    if not postings:
+        log.info("[scout] falling back to deterministic multi-board search")
+        postings = _direct_scout(profile, query, limit)
+
+    if not postings:
+        raise RuntimeError(
+            "Scout produced no postings — both Adzuna and BA-Jobsuche returned "
+            "empty or unusable results. Check API credentials and network."
+        )
+
+    return postings[:limit]
+
+
+def _run_crew_scout(
+    profile: UserProfile, query: str | None = None, limit: int = 5
+) -> list[JobPosting]:
+    """Run the CrewAI agent (LLM orchestrates the search tools). May raise."""
     scout_agent = _build_scout_agent()
     search_hint = query or " ".join(profile.skills[:3])
     per_source = max(limit, 5)
@@ -192,22 +258,13 @@ def run_scout(
 
     crew = Crew(agents=[scout_agent], tasks=[task], verbose=False)
     crew_output = crew.kickoff(inputs={"profile_json": profile.model_dump_json()})
-
-    raw_items = _parse_postings(crew_output.raw)
+    raw_items = _parse_postings(crew_output.raw)  # type: ignore[union-attr]
     postings: list[JobPosting] = []
     for item in raw_items:
         try:
             postings.append(JobPosting.model_validate(item))
         except Exception as exc:
             log.warning("[scout] dropping invalid posting from LLM output: %s", exc)
-
     postings = _dedup(postings)
-    log.info("[scout] validated %d postings", len(postings))
-
-    if not postings:
-        raise RuntimeError(
-            "Scout produced no postings — both Adzuna and BA-Jobsuche returned "
-            "empty or unusable results. Check API credentials and network."
-        )
-
-    return postings[:limit]
+    log.info("[scout] agent validated %d postings", len(postings))
+    return postings

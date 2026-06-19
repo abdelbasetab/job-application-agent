@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Job Application Agent</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand-mark">JA</div>
+          <div class="brand-text">
+            <strong>Job Application Agent</strong>
+            <span id="statusText">Bereit</span>
+          </div>
+        </div>
+        <nav class="nav" aria-label="Hauptnavigation">
+          <button class="nav-link" data-route="profil" type="button">
+            <span class="nav-ico">①</span> Profil
+          </button>
+          <button class="nav-link" data-route="pipeline" type="button">
+            <span class="nav-ico">②</span> Pipeline
+          </button>
+        </nav>
+        <div class="topbar-right">
+          <span id="providerBadge" class="provider-badge">LLM</span>
+        </div>
+      </header>
+
+      <div id="globalProgress" class="progress hidden" role="status" aria-live="polite">
+        <div class="progress-info">
+          <span id="progressLabel">Arbeite …</span>
+          <span id="progressPct"></span>
+        </div>
+        <div class="progress-track"><div id="progressFill" class="progress-fill"></div></div>
+        <div id="agentProgress" class="agent-progress" aria-label="Pipeline Agenten">
+          <div class="agent-step" data-agent="scout">
+            <span class="agent-dot">1</span>
+            <div><strong>Scout</strong><small>Wartet</small></div>
+          </div>
+          <div class="agent-step" data-agent="matcher">
+            <span class="agent-dot">2</span>
+            <div><strong>Matcher</strong><small>Wartet</small></div>
+          </div>
+          <div class="agent-step" data-agent="writer">
+            <span class="agent-dot">3</span>
+            <div><strong>Writer</strong><small>Wartet</small></div>
+          </div>
+          <div class="agent-step" data-agent="tracker">
+            <span class="agent-dot">4</span>
+            <div><strong>Tracker</strong><small>Wartet</small></div>
+          </div>
+        </div>
+      </div>
+
+      <main class="main">
+        <!-- ============================== PROFIL ============================== -->
+        <section id="view-profil" class="view">
+          <div class="page-head">
+            <h1>Profil</h1>
+            <div id="profileStatus" class="profile-status demo">Aktives Profil: Demo-Profil</div>
+            <p>Lade deinen Lebenslauf hoch — das Profil wird extrahiert und hier zum Prüfen angezeigt.</p>
+          </div>
+
+          <div class="grid-2">
+            <div class="card">
+              <h2 class="card-title">Lebenslauf importieren</h2>
+              <div id="dropzone" class="dropzone" tabindex="0" role="button"
+                   aria-label="CV-Datei auswählen oder hierher ziehen">
+                <input id="cvFile" type="file" accept=".pdf,.docx,.txt,.md" hidden />
+                <div class="dz-icon">⬆</div>
+                <p class="dz-main"><strong>PDF hierher ziehen</strong> oder klicken</p>
+                <p class="dz-sub">PDF (auch gescannt – OCR), DOCX, TXT, MD</p>
+              </div>
+              <p id="cvFileStatus" class="hint"></p>
+
+              <details class="paste">
+                <summary>Stattdessen Text einfügen</summary>
+                <textarea id="cvInput" rows="6" placeholder="Lebenslauf-Text hier einfügen …"></textarea>
+              </details>
+
+              <button id="buildProfileBtn" class="btn btn-primary btn-wide" type="button">
+                Profil erstellen &amp; prüfen
+              </button>
+              <div class="profile-actions">
+                <button id="demoProfileBtn" class="btn btn-ghost" type="button">Demo-Profil laden</button>
+                <button id="goPipelineBtn" class="btn btn-ghost" type="button">Zur Pipeline</button>
+              </div>
+            </div>
+
+            <div class="card">
+              <h2 class="card-title">Extrahiertes Profil</h2>
+              <div id="profilePanel" class="profile-empty">
+                Noch kein Profil. Importiere links einen Lebenslauf und klicke
+                <em>„Profil erstellen &amp; prüfen"</em>.
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ============================== PIPELINE ============================== -->
+        <section id="view-pipeline" class="view hidden">
+          <div class="page-head">
+            <h1>Pipeline</h1>
+            <p>Scout → Matcher → Writer → Tracker. <span id="activeProfile" class="active-profile"></span></p>
+          </div>
+
+          <div class="card controls">
+            <div class="controls-row">
+              <label class="field">
+                <span>Suchbegriff</span>
+                <input id="queryInput" type="text" value="Werkstudent KI" />
+              </label>
+              <label class="field field-sm">
+                <span>Limit</span>
+                <input id="limitInput" type="number" min="1" max="25" value="5" />
+              </label>
+              <label class="field field-sm">
+                <span>Threshold</span>
+                <input id="thresholdInput" type="number" min="0" max="1" step="0.05" value="0.5" />
+              </label>
+              <div class="field">
+                <span>Modus</span>
+                <div class="segmented" role="group" aria-label="Scout-Modus">
+                  <button id="demoModeBtn" class="segment active" type="button">Demo</button>
+                  <button id="liveModeBtn" class="segment" type="button">Live</button>
+                </div>
+              </div>
+              <button id="runBtn" class="btn btn-primary" type="button">
+                <span class="btn-ico">▶</span> Pipeline starten
+              </button>
+            </div>
+
+            <div class="controls-row toggles">
+              <label class="check"><input id="llmInput" type="checkbox" /><span>LLM-Agenten</span></label>
+              <label class="check"><input id="chromaInput" type="checkbox" /><span>Chroma</span></label>
+              <label class="check"><input id="draftAllInput" type="checkbox" /><span>Entwürfe für alle Jobs</span></label>
+              <label class="check"><input id="resetInput" type="checkbox" checked /><span>DB zurücksetzen</span></label>
+              <details class="advanced">
+                <summary>Erweitert</summary>
+                <label class="field">
+                  <span>DB-Pfad</span>
+                  <input id="dbPathInput" type="text" value="./data/demo_job_agent.db" />
+                </label>
+              </details>
+            </div>
+          </div>
+
+          <div class="metrics">
+            <div class="metric"><span>Jobs</span><strong id="jobsMetric">0</strong></div>
+            <div class="metric"><span>Matches</span><strong id="matchesMetric">0</strong></div>
+            <div class="metric"><span>Entwürfe</span><strong id="draftsMetric">0</strong></div>
+            <div class="metric"><span>Getrackt</span><strong id="trackedMetric">0</strong></div>
+          </div>
+
+          <div class="results-grid">
+            <div class="card table-card">
+              <div class="card-head">
+                <h2 class="card-title">Jobs</h2>
+                <span id="dbPathLabel" class="muted-sm"></span>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr><th>Rolle</th><th>Unternehmen</th><th>Score</th><th>Status</th></tr>
+                  </thead>
+                  <tbody id="jobsBody">
+                    <tr><td colspan="4" class="empty">Noch keine Jobs — starte die Pipeline.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="card detail-card">
+              <div class="card-head">
+                <h2 class="card-title" id="detailTitle">Details</h2>
+                <a id="jobLink" href="#" target="_blank" rel="noreferrer">Quelle ↗</a>
+              </div>
+              <div id="jobDetail" class="detail-body empty-detail">Keine Auswahl</div>
+            </div>
+          </div>
+
+          <div class="card letters-card">
+            <div class="card-head">
+              <h2 class="card-title">Anschreiben</h2>
+              <div class="letter-actions">
+                <select id="statusSelect" aria-label="Bewerbungsstatus">
+                  <option value="draft">Entwurf</option>
+                  <option value="submitted">Eingereicht</option>
+                  <option value="interview">Interview</option>
+                  <option value="offer">Angebot</option>
+                  <option value="rejected">Absage</option>
+                  <option value="withdrawn">Zurückgezogen</option>
+                </select>
+                <input id="notesInput" type="text" placeholder="Notiz" />
+                <input id="emailRecipientInput" type="email" placeholder="E-Mail Empfänger" />
+                <button id="sendEmailBtn" class="btn btn-primary" type="button">E-Mail senden</button>
+                <button id="saveStatusBtn" class="btn btn-ghost" type="button">Status speichern</button>
+                <button id="copyBtn" class="btn btn-ghost" type="button">Kopieren</button>
+              </div>
+            </div>
+            <pre id="letterBody">Noch kein Entwurf.</pre>
+          </div>
+        </section>
+      </main>
+    </div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

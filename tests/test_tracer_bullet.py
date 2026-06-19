@@ -119,6 +119,18 @@ def test_matcher_skill_overlap_scoring(
     store.close()
 
 
+def test_threshold_zero_drafts_every_found_job(
+    tmp_path: Path, mocked_scout: list[JobPosting]
+) -> None:
+    store = Store(tmp_path / "test.db")
+    result = run_pipeline(profile=_profile(), store=store, match_threshold=0.0)
+
+    assert len(result.jobs) == len(mocked_scout)
+    assert len(result.applications) == len(result.jobs)
+    assert any(m.score == 0 for m in result.matches)
+    store.close()
+
+
 def test_dedup_guard_skips_already_applied(
     tmp_path: Path, mocked_scout: list[JobPosting]
 ) -> None:

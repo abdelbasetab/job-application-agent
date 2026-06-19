@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import pytest
 
-from job_agent.agents.scout import run_scout
 from job_agent.schemas import UserProfile
 from job_agent.schemas.profile import Preferences
 from job_agent.tools.job_search import adzuna_search, ba_jobsuche_search
@@ -54,6 +53,8 @@ def test_ba_jobsuche_search_returns_validated_postings() -> None:
 
 @pytest.mark.integration
 def test_run_scout_combines_real_sources() -> None:
+    from job_agent.agents.scout import run_scout
+
     jobs = run_scout(_profile(), query="Python Berlin", limit=3)
     assert 1 <= len(jobs) <= 3
     assert all(j.source in ("adzuna", "ba-jobsuche") for j in jobs)
