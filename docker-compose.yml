@@ -1,0 +1,22 @@
+# Local/production run of the multi-user web UI.
+#   docker compose up --build
+# Configure providers/secrets in .env (see .env.example); never commit real keys.
+services:
+  web:
+    build: .
+    image: job-application-agent:latest
+    ports:
+      - "${WEB_PORT:-7860}:7860"
+    environment:
+      # Behind an HTTPS reverse proxy, set WEB_SECURE_COOKIES=true here.
+      WEB_SECURE_COOKIES: "${WEB_SECURE_COOKIES:-false}"
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      # Persist SQLite stores + per-user data across container restarts.
+      - job_agent_data:/data
+    restart: unless-stopped
+
+volumes:
+  job_agent_data:

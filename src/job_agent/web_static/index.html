@@ -7,7 +7,41 @@
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
-    <div class="app">
+    <section id="authView" class="auth-view">
+      <div class="auth-panel">
+        <div class="auth-brand">
+          <div class="brand-mark">JA</div>
+          <div>
+            <h1>Job Application Agent</h1>
+            <p>Account-Zugang für Profil, Pipeline und Tracker.</p>
+          </div>
+        </div>
+        <div class="auth-card">
+          <div class="auth-tabs" role="group" aria-label="Auth Modus">
+            <button id="loginTabBtn" class="auth-tab active" type="button">Login</button>
+            <button id="registerTabBtn" class="auth-tab" type="button">Registrieren</button>
+          </div>
+          <form id="authForm" class="auth-form">
+            <label class="field">
+              <span>E-Mail</span>
+              <input id="authEmailInput" type="email" autocomplete="email" required />
+            </label>
+            <label class="field">
+              <span>Passwort</span>
+              <input id="authPasswordInput" type="password" autocomplete="current-password" required />
+            </label>
+            <label id="authConfirmField" class="field hidden">
+              <span>Passwort bestätigen</span>
+              <input id="authConfirmInput" type="password" autocomplete="new-password" />
+            </label>
+            <button id="authSubmitBtn" class="btn btn-primary btn-wide" type="submit">Einloggen</button>
+            <p id="authMessage" class="auth-message"></p>
+          </form>
+        </div>
+      </div>
+    </section>
+
+    <div id="appShell" class="app hidden">
       <header class="topbar">
         <div class="brand">
           <div class="brand-mark">JA</div>
@@ -26,6 +60,8 @@
         </nav>
         <div class="topbar-right">
           <span id="providerBadge" class="provider-badge">LLM</span>
+          <span id="currentUserLabel" class="user-badge"></span>
+          <button id="logoutBtn" class="btn btn-ghost btn-sm" type="button">Logout</button>
         </div>
       </header>
 
@@ -164,10 +200,10 @@
               <div class="table-wrap">
                 <table>
                   <thead>
-                    <tr><th>Rolle</th><th>Unternehmen</th><th>Score</th><th>Status</th></tr>
+                    <tr><th>Rolle</th><th>Unternehmen</th><th>Quelle</th><th>Score</th><th>Status</th></tr>
                   </thead>
                   <tbody id="jobsBody">
-                    <tr><td colspan="4" class="empty">Noch keine Jobs — starte die Pipeline.</td></tr>
+                    <tr><td colspan="5" class="empty">Noch keine Jobs — starte die Pipeline.</td></tr>
                   </tbody>
                 </table>
               </div>
@@ -197,6 +233,7 @@
                 <input id="notesInput" type="text" placeholder="Notiz" />
                 <input id="emailRecipientInput" type="email" placeholder="E-Mail Empfänger" />
                 <button id="sendEmailBtn" class="btn btn-primary" type="button">E-Mail senden</button>
+                <button id="syncInboxBtn" class="btn btn-ghost" type="button">Inbox prüfen</button>
                 <button id="saveStatusBtn" class="btn btn-ghost" type="button">Status speichern</button>
                 <button id="copyBtn" class="btn btn-ghost" type="button">Kopieren</button>
               </div>

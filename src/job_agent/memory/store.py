@@ -25,20 +25,37 @@ from job_agent.utils.logging import get_logger
 log = get_logger(__name__)
 
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS jobs (
-    job_id  TEXT PRIMARY KEY,
-    payload TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS applications (
-    job_id  TEXT PRIMARY KEY,
-    payload TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS status (
-    job_id  TEXT PRIMARY KEY,
-    payload TEXT NOT NULL
-);
-"""
+# Ordered, append-only schema migrations. Each entry upgrades the DB by one
+# version; `PRAGMA user_version` records how many have been applied, so existing
+# databases upgrade in place and new ones are built from scratch — never edit a
+# past migration, add a new one.
+_MIGRATIONS: list[str] = [
+    # v1 — base tables (one JSON payload per job_id).
+    """
+    CREATE TABLE IF NOT EXISTS jobs (
+        job_id  TEXT PRIMARY KEY,
+        payload TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS applications (
+        job_id  TEXT PRIMARY KEY,
+        payload TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS status (
+        job_id  TEXT PRIMARY KEY,
+        payload TEXT NOT NULL
+    );
+    """,
+]
+
+
+def apply_migrations(conn: sqlite3.Connection) -> int:
+    """Bring `conn` up to the latest schema version. Returns that version."""
+    version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+    for index in range(version, len(_MIGRATIONS)):
+        conn.executescript(_MIGRATIONS[index])
+        conn.execute(f"PRAGMA user_version = {index + 1}")
+    conn.commit()
+    return len(_MIGRATIONS)
 
 
 class Store:
@@ -46,9 +63,12 @@ class Store:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self.db_path)
-        self._conn.executescript(_SCHEMA)
-        self._conn.commit()
-        log.info("[store] opened sqlite at %s", self.db_path)
+        # WAL keeps concurrent readers from blocking the writer — important now
+        # that each authenticated user has their own DB hit per request.
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA foreign_keys=ON")
+        version = apply_migrations(self._conn)
+        log.info("[store] opened sqlite at %s (schema v%d)", self.db_path, version)
 
     # ----- jobs -----
     def save_job(self, job: JobPosting) -> None:

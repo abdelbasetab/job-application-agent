@@ -227,15 +227,19 @@ def read_cv_cmd(
 
 @app.command("web")
 def web_cmd(
-    host: str = typer.Option("127.0.0.1", "--host", help="Host for the local web UI."),
-    port: int = typer.Option(7860, "--port", help="Port for the local web UI."),
+    host: str = typer.Option(
+        settings.web_host, "--host", help="Host for the web UI (env: WEB_HOST)."
+    ),
+    port: int = typer.Option(
+        settings.web_port, "--port", help="Port for the web UI (env: WEB_PORT)."
+    ),
     open_browser: bool = typer.Option(
         False,
         "--open",
         help="Open the web UI in the default browser.",
     ),
 ) -> None:
-    """Start the local browser UI."""
+    """Start the multi-user browser UI."""
     run_web_server(host=host, port=port, open_browser=open_browser)
 
 

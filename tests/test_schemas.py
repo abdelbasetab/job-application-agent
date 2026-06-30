@@ -12,6 +12,7 @@ from job_agent.schemas import (
     GeneratedApplication,
     JobPosting,
     MatchResult,
+    ScoreComponent,
     UserProfile,
 )
 from job_agent.schemas.profile import Experience, Preferences
@@ -64,6 +65,29 @@ def test_matchresult_score_bounds() -> None:
         MatchResult(job_id="x", score=1.5, rationale="r")
     with pytest.raises(ValidationError):
         MatchResult(job_id="x", score=-0.1, rationale="r")
+
+
+def test_matchresult_accepts_explainable_rubric() -> None:
+    match = MatchResult(
+        job_id="x",
+        score=0.82,
+        rationale="Strong fit.",
+        score_components=[
+            ScoreComponent(
+                key="hard_skills",
+                label="Muss-Skills",
+                score=4,
+                weight=45,
+                evidence="2/3 skills match.",
+            )
+        ],
+        risk_level="low",
+        recommendation="strong",
+        score_summary="Sehr guter Fit.",
+    )
+
+    assert match.score_components[0].score == 4
+    assert match.risk_level == "low"
 
 
 def test_userprofile_round_trip() -> None:

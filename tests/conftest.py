@@ -63,10 +63,22 @@ def _stub_jobs() -> list[JobPosting]:
 
 
 @pytest.fixture(autouse=True)
-def stub_scout(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Replace run_scout with a deterministic stub for every test.
+def offline_defaults(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[None]:
+    """Make every non-integration test deterministic and network-free.
 
-    Tests marked ``integration`` skip the patch so they exercise the real LLM.
+    Two things would otherwise leak the ambient environment into the "offline"
+    suite:
+
+    * the default Scout makes a real LLM call — we stub it with fixed postings;
+    * Matcher/Writer follow ``settings.enable_llm_agents``, so a developer whose
+      ``.env`` sets ``ENABLE_LLM_AGENTS=true`` would silently hit the real LLM,
+      making score assertions slow and flaky. We force the agent defaults off.
+
+    Tests that exercise the LLM paths pass ``use_llm=True`` explicitly (and mock
+    ``call_llm``), so they override these defaults. Tests marked ``integration``
+    opt out entirely and talk to the real services.
     """
     if request.node.get_closest_marker("integration") is not None:
         yield
@@ -77,4 +89,6 @@ def stub_scout(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr("job_agent.pipeline.run_scout", fake_run_scout)
     monkeypatch.setattr("job_agent.agents.scout.run_scout", fake_run_scout)
+    monkeypatch.setattr("job_agent.utils.config.settings.enable_llm_agents", False)
+    monkeypatch.setattr("job_agent.utils.config.settings.enable_chroma", False)
     yield

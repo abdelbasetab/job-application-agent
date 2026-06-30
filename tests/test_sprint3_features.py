@@ -78,6 +78,49 @@ def test_llm_matcher_falls_back_when_llm_unavailable(monkeypatch) -> None:  # ty
     assert match.rationale.startswith("LLM fallback:")
 
 
+def test_matcher_returns_rubric_and_skill_synonyms() -> None:
+    job = _job().model_copy(
+        update={
+            "requirements": ["PostgreSQL", "LLM"],
+            "nice_to_have": ["Chroma DB"],
+            "description": "Python services with PostgreSQL, LLM workflows and RAG.",
+        }
+    )
+
+    [match] = run_matcher([job], _profile(), use_llm=False)
+
+    assert match.score >= 0.8
+    assert {"sql", "llms"}.issubset(set(match.matched_skills))
+    assert match.score_components
+    assert {item.key for item in match.score_components} >= {
+        "hard_skills",
+        "location",
+        "posting_quality",
+    }
+    assert match.risk_level == "low"
+
+
+def test_matcher_flags_high_risk_ghost_job() -> None:
+    suspicious = JobPosting(
+        id="ghost-1",
+        source="manual",
+        source_id="ghost-1",
+        url="https://example.com/ghost-1",
+        title="Heimarbeit Job Angebot",
+        company="Vertraulich",
+        location="Remote",
+        description="Schnell Geld per WhatsApp. Keine Erfahrung notwendig.",
+        requirements=[],
+    )
+
+    [match] = run_matcher([suspicious], _profile(), use_llm=False)
+
+    assert match.risk_level == "high"
+    assert match.recommendation == "skip"
+    assert match.risk_flags
+    assert match.score < 0.35
+
+
 def test_llm_writer_falls_back_without_sprint1_note(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     def broken_llm():
         raise RuntimeError("no local model")

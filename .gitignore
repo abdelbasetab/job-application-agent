@@ -41,11 +41,14 @@ data/applications/*.pdf
 \!data/jobs/.gitkeep
 \!data/applications/.gitkeep
 
-# Local DBs
+# Local DBs (incl. WAL side-files) and per-user data
 *.db
+*.db-wal
+*.db-shm
 *.sqlite
 *.sqlite3
 chroma_db/
+data/users/
 
 # Logs
 logs/

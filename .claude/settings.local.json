@@ -1,8 +1,27 @@
 {
   "permissions": {
     "allow": [
-      "PowerShell(ollama *)",
-      "PowerShell(Test-Path *)"
+      "Bash(curl -s http://localhost/api/v1/health)",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('OK - Chunks:', d.get\\('total_chunks','?'\\)\\)\")",
+      "Bash(python evaluate_rag_local.py)",
+      "Bash(C:/Users/abidi/OneDrive/Desktop/Agentic AI Module/job-application-agent/.venv/Scripts/python.exe *)",
+      "Bash(.venv/Scripts/python.exe -m mypy src)",
+      "Bash(.venv/Scripts/python.exe -m ruff check src tests)",
+      "Bash(.venv/Scripts/python.exe -m pytest)",
+      "Bash(.venv/Scripts/python.exe -m job_agent.main run-pipeline --help)",
+      "Bash(.venv/Scripts/python.exe -m job_agent.main --help)",
+      "Bash(.venv/Scripts/python.exe -)",
+      "Bash(.venv/Scripts/python.exe -m job_agent.main web --host 127.0.0.1 --port 7860)",
+      "PowerShell(Start-Process \"http://127.0.0.1:7860\"; Write-Output \"Geoeffnet — bitte Strg+F5 \\(Hartladen\\).\")",
+      "Bash(.venv/Scripts/python.exe \"C:/Users/abidi/.claude/jobs/ca351aba/tmp/fix_scout_fallback.py\")",
+      "Bash(.venv/Scripts/python.exe -m ruff check src)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_migrations.py tests/test_web.py tests/test_web_security.py tests/test_auth_store.py tests/test_email_sync.py -q)",
+      "Bash(grep -vE \"^\\\\.+$\")",
+      "Bash(.venv/Scripts/python.exe \"C:/Users/abidi/AppData/Local/Temp/claude/C--Users-abidi-OneDrive-Desktop-Agentic-AI-Module-job-application-agent/97a875a2-4030-4945-bf93-8f2312c66e1a/scratchpad/smoke_web.py\")",
+      "Bash(command -v docker)",
+      "Bash(docker --version)",
+      "Bash(docker compose *)",
+      "Bash(.venv/Scripts/python.exe -m pytest -p no:cacheprovider)"
     ]
   }
 }

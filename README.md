@@ -12,9 +12,9 @@ Built as the portfolio project for the *AI Agents & RAG Systems* module
 | --- | --- |
 | Profiler | Reads your CV / Lebenslauf (PDF/DOCX/TXT/MD) and extracts a structured profile via the configured LLM |
 | Scout | Finds job postings via Adzuna + BA-Jobsuche, with an offline demo scout for stable presentations |
-| Matcher | Scores postings with optional Sprint-3 LLM semantics and deterministic fallback |
+| Matcher | Scores postings with an explainable weighted 1–5 rubric + ghost-job/scam risk check (optional LLM semantics, deterministic fallback) |
 | Writer | Drafts German cover letters with optional Sprint-3 LLM generation and template fallback |
-| Tracker | Persists jobs, drafted applications, and status records in SQLite |
+| Tracker | Persists jobs, drafted applications, and status records in SQLite; can email applications (SMTP) and sync replies (IMAP) |
 
 All handoffs use typed Pydantic schemas instead of freeform strings.
 
@@ -35,6 +35,10 @@ Sprint 3 is implemented as code, with one important demo distinction:
   `EMBEDDING_MODEL` is set it uses the OpenAI-compatible KI-Connect
   `/embeddings` endpoint, otherwise it falls back to local deterministic hash
   vectors.
+- The browser UI is a **multi-user web app**: account login, per-user data
+  isolation, CSRF protection, rate-limited auth, SQLite schema migrations, and
+  a `Dockerfile` + `compose` + CI workflow for deployment (see **Web UI** and
+  **Deployment** below).
 
 ## Quick Start
 
@@ -123,14 +127,30 @@ EMBEDDING_MODEL=Qwen 3 Embedding 8B
 
 ```bash
 python -m job_agent.main web --host 127.0.0.1 --port 7860
+# host/port also read from WEB_HOST / WEB_PORT
 ```
 
-Open `http://127.0.0.1:7860` and run the same demo/live pipeline from the
-browser. In the **Lebenslauf (CV)** panel you can **import your CV as PDF**
-(or TXT/MD) — the file is parsed server-side, the extracted text fills the CV
-box, then click **Pipeline**. A ready-to-try sample lives at
-`data/profile/sample_cv.pdf`. The UI uses the existing SQLite store and works
-without extra web framework dependencies.
+Open `http://127.0.0.1:7860`. The UI is **multi-user**: visitors register or log
+in first, and every account gets its own isolated pipeline data (profile, jobs,
+applications, tracker) under `data/users/<id>/` — no account can see another's
+data. In the **Lebenslauf (CV)** panel you can **import your CV as PDF** (or
+TXT/MD) — the file is parsed server-side, the extracted text fills the CV box,
+then click **Pipeline**. A ready-to-try sample lives at
+`data/profile/sample_cv.pdf`. The Matcher shows an explainable **1–5 scoring
+rubric** (weighted dimensions with evidence) and a **ghost-job / scam risk
+check** per posting. The server is stdlib-only — no extra web framework.
+
+### Accounts & security
+
+- **Auth:** email + password, hashed with PBKDF2-HMAC-SHA256; sessions are
+  random tokens stored only as SHA-256 hashes, in a 7-day `HttpOnly` cookie.
+- **Per-user isolation:** all SQLite paths are confined to the requester's own
+  `data/users/<id>/` directory; cross-user or traversal paths are rejected.
+- **CSRF:** state-changing requests require a double-submit `X-CSRF-Token`
+  header matching the `job_agent_csrf` cookie (on top of `SameSite=Lax`).
+- **Throttling:** login/registration are rate-limited per IP (and per email).
+- **HTTPS:** set `WEB_SECURE_COOKIES=true` when serving behind a TLS proxy so
+  cookies carry the `Secure` flag. Misconfiguration is logged at startup.
 
 ### Tracker email demo
 
@@ -158,6 +178,40 @@ When a real email is sent, the Tracker marks the application as `submitted`
 and stores `submitted_at`. In dry-run mode it records a note but keeps the
 status unchanged.
 
+The Tracker can also read replies from your inbox and classify common
+application responses:
+
+```dotenv
+EMAIL_SYNC_DRY_RUN=true
+EMAIL_IMAP_HOST=imap.gmail.com
+EMAIL_IMAP_PORT=993
+EMAIL_IMAP_USER=your-email@gmail.com
+EMAIL_IMAP_PASSWORD=your-app-password
+EMAIL_IMAP_FOLDER=INBOX
+```
+
+Recognized replies are mapped to `submitted`, `interview`, `rejected`, or
+`offer`. With `EMAIL_SYNC_DRY_RUN=true`, the UI only shows proposed updates.
+Set `EMAIL_SYNC_DRY_RUN=false` after testing to let the Tracker update statuses
+automatically.
+
+## Deployment (Docker)
+
+The multi-user server ships with a production `Dockerfile` and `compose` file.
+The image runs as a non-root user, persists all data to a `/data` volume, and
+has a healthcheck on `/api/auth/me`.
+
+```bash
+# Build + run (reads .env if present; persists data in a named volume)
+docker compose up --build
+# → http://localhost:7860
+```
+
+Key deployment env vars (see `.env.example`): `WEB_HOST`, `WEB_PORT`,
+`JOB_AGENT_DATA_DIR` (writable data root), and `WEB_SECURE_COOKIES=true` when
+running behind HTTPS. Continuous integration (`.github/workflows/ci.yml`) runs
+`ruff`, `mypy`, and the full `pytest` suite on every push and pull request.
+
 ## Live Scout
 
 The live Scout uses:
@@ -182,16 +236,19 @@ offline `--demo` mode for the Sprint review.
 src/job_agent/
   main.py              Typer CLI entrypoint
   pipeline.py          Orchestrates Scout -> Matcher -> Writer -> Tracker
+  web.py               Multi-user stdlib web server (auth, CSRF, per-user data)
+  web_static/          Browser UI (index.html, app.js, styles.css)
   schemas/             Pydantic contracts between agents
   agents/              scout.py, demo_scout.py, matcher.py, writer.py, tracker.py
-  tools/               job_search.py live API adapters
-  memory/              store.py SQLite persistence, profile_index.py ChromaDB context
+  tools/               job_search.py + email_delivery.py / email_sync.py
+  memory/              store.py + auth_store.py (SQLite, migrated), profile_index.py
   prompts/             Prompt templates for LLM-backed agents
   utils/               Config and logging
 
 tests/                 Offline unit tests + integration tests
 docs/                  ADRs, legal notes, Sprint 1 handoff
-data/                  Local profile and SQLite data
+data/                  Per-user SQLite stores + auth.db (gitignored)
+Dockerfile, docker-compose.yml, .github/workflows/ci.yml
 ```
 
 ## Test Status
@@ -200,7 +257,7 @@ Expected offline result:
 
 ```bash
 pytest
-# 17 passed, 3 deselected
+# 92 passed, 3 deselected
 ```
 
 Integration tests are intentionally separate:

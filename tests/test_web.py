@@ -9,6 +9,29 @@ from job_agent.memory.store import Store
 from job_agent.web import WebState, _run_pipeline_from_payload
 
 
+def test_web_auth_register_login_me_logout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(web, "AUTH_DB_PATH", tmp_path / "auth.db")
+
+    registered = web._register_from_payload(
+        {"email": "demo@example.com", "password": "password-123"}
+    )
+    token = str(registered["session_token"])
+    assert registered["ok"] is True
+    assert registered["user"]["email"] == "demo@example.com"
+
+    me = web._auth_me_from_cookie(f"{web.AUTH_COOKIE}={token}")
+    assert me["authenticated"] is True
+    assert me["user"]["email"] == "demo@example.com"
+
+    logged_in = web._login_from_payload(
+        {"email": "demo@example.com", "password": "password-123"}
+    )
+    assert logged_in["ok"] is True
+
+    web._logout_from_cookie(f"{web.AUTH_COOKIE}={token}")
+    assert web._auth_me_from_cookie(f"{web.AUTH_COOKIE}={token}")["authenticated"] is False
+
+
 def test_web_pipeline_payload_runs_demo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(web, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(web, "DATA_DIR", tmp_path / "data")
@@ -33,6 +56,9 @@ def test_web_pipeline_payload_runs_demo(tmp_path: Path, monkeypatch: pytest.Monk
     assert response["summary"]["jobs"] == 2
     assert response["summary"]["matches"] == 2
     assert response["jobs"][0]["title"]
+    assert response["jobs"][0]["source_label"]
+    assert response["jobs"][0]["score_components"]
+    assert response["jobs"][0]["risk_level"] in {"low", "medium", "high"}
     assert response["applications"]
     assert db_path.exists()
 
@@ -57,9 +83,10 @@ def test_use_demo_profile_sets_current_profile() -> None:
     out = web._use_demo_profile(state)
     assert out["ok"] is True
     assert out["source"] == "demo"
-    assert state.current_profile is not None
-    assert state.current_profile_source == "demo"
-    assert state.current_profile.name == out["profile"]["name"]
+    sess = state.session(None)
+    assert sess.current_profile is not None
+    assert sess.current_profile_source == "demo"
+    assert sess.current_profile.name == out["profile"]["name"]
 
 
 def test_pipeline_keeps_demo_profile_source_after_demo_load(
@@ -191,6 +218,47 @@ def test_send_application_email_dry_run_records_note_without_submitting(
     assert out["email"]["dry_run"] is True
     assert out["status"]["status"] == "draft"
     assert "Dry-run vorbereitet" in out["status"]["notes"]
+
+
+def test_sync_email_status_endpoint_returns_updates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(web, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(web, "DATA_DIR", tmp_path / "data")
+    db_path = tmp_path / "data" / "web_demo.db"
+    state = WebState()
+
+    response = _run_pipeline_from_payload(
+        {
+            "demo": True,
+            "limit": 1,
+            "threshold": 0.5,
+            "db_path": str(db_path),
+            "reset_db": True,
+        },
+        state,
+    )
+    job_id = response["jobs"][0]["id"]
+
+    def fake_sync(store, limit=None):  # type: ignore[no-untyped-def]
+        return {
+            "ok": True,
+            "dry_run": True,
+            "updates": [{"job_id": job_id, "stage": "interview"}],
+        }
+
+    monkeypatch.setattr("job_agent.tools.email_sync.sync_email_statuses", fake_sync)
+
+    out = web._sync_email_status_from_payload(
+        {
+            "db_path": str(db_path),
+        },
+        state,
+    )
+
+    assert out["ok"] is True
+    assert out["sync"]["updates"][0]["stage"] == "interview"
+    assert out["applications"]
 
 
 def test_update_status_rejects_unknown_stage(
