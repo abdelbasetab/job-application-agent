@@ -138,6 +138,102 @@ def test_web_draft_all_creates_drafts_for_low_score_jobs(
     assert any((job["score"] or 0) < 0.5 for job in response["jobs"])
 
 
+def test_generate_draft_creates_application_for_selected_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(web, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(web, "DATA_DIR", tmp_path / "data")
+    db_path = tmp_path / "data" / "manual_draft.db"
+    state = WebState()
+    response = _run_pipeline_from_payload(
+        {
+            "demo": True,
+            "limit": 1,
+            "threshold": 0.99,
+            "draft_all": False,
+            "db_path": str(db_path),
+            "reset_db": True,
+            "force_demo_profile": True,
+        },
+        state,
+    )
+    job_id = response["jobs"][0]["id"]
+    assert response["summary"]["drafts"] == 0
+
+    out = web._generate_draft_from_payload({"db_path": str(db_path), "job_id": job_id}, state)
+
+    assert out["ok"] is True
+    assert out["application"]["job_id"] == job_id
+    assert out["applications"][0]["job_id"] == job_id
+
+    store = Store(db_path)
+    try:
+        assert store.get_application(job_id) is not None
+        assert store.get_status(job_id).status == "draft"  # type: ignore[union-attr]
+    finally:
+        store.close()
+
+
+def test_state_payload_rebuilds_jobs_and_applications_from_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(web, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(web, "DATA_DIR", tmp_path / "data")
+    db_path = tmp_path / "data" / "state_rebuild.db"
+    state = WebState()
+    response = _run_pipeline_from_payload(
+        {
+            "demo": True,
+            "limit": 1,
+            "draft_all": True,
+            "db_path": str(db_path),
+            "reset_db": True,
+            "force_demo_profile": True,
+        },
+        state,
+    )
+    job_id = response["jobs"][0]["id"]
+
+    with state.lock:
+        state.session(None).last_result = None
+
+    out = web._state_payload(state)
+
+    assert out["ok"] is True
+    assert out["jobs"][0]["id"] == job_id
+    assert out["applications"][0]["job_id"] == job_id
+    assert out["summary"]["drafts"] == 1
+
+
+def test_report_and_interview_prep_fall_back_to_current_search(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(web, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(web, "DATA_DIR", tmp_path / "data")
+    state = WebState()
+    response = _run_pipeline_from_payload(
+        {
+            "demo": True,
+            "limit": 1,
+            "threshold": 0.99,
+            "db_path": str(tmp_path / "data" / "first.db"),
+            "reset_db": True,
+            "force_demo_profile": True,
+        },
+        state,
+    )
+    job_id = response["jobs"][0]["id"]
+    empty_db = tmp_path / "data" / "empty.db"
+
+    prep = web._interview_prep_payload({"db_path": [str(empty_db)], "job_id": [job_id]}, state)
+    report = web._export_report_from_payload({"db_path": str(empty_db), "job_id": job_id}, state)
+
+    assert prep["ok"] is True
+    assert prep["prep"]["job_id"] == job_id
+    assert report["ok"] is True
+    assert report["download"].startswith("/api/download?")
+
+
 def test_update_status_persists_application_status(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -240,7 +336,7 @@ def test_sync_email_status_endpoint_returns_updates(
     )
     job_id = response["jobs"][0]["id"]
 
-    def fake_sync(store, limit=None):  # type: ignore[no-untyped-def]
+    def fake_sync(store, limit=None, account=None):  # type: ignore[no-untyped-def]
         return {
             "ok": True,
             "dry_run": True,

@@ -21,7 +21,21 @@
       "Bash(command -v docker)",
       "Bash(docker --version)",
       "Bash(docker compose *)",
-      "Bash(.venv/Scripts/python.exe -m pytest -p no:cacheprovider)"
+      "Bash(.venv/Scripts/python.exe -m pytest -p no:cacheprovider)",
+      "Bash(.venv/Scripts/python.exe -m ruff check src/job_agent/utils/doctor.py src/job_agent/main.py tests/test_doctor.py)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_doctor.py -q)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_liveness.py tests/test_migrations.py tests/test_web.py -q)",
+      "Bash(.venv/Scripts/python.exe -m pip install \"fpdf2>=2.7\")",
+      "Bash(.venv/Scripts/python.exe -c \"import fpdf; print\\('fpdf2', fpdf.__version__\\)\")",
+      "Bash(.venv/Scripts/python.exe -c ' *)",
+      "Bash(grep -vE \"INFO|drafted|checks|name_correct|^\\\\s*$\")",
+      "Bash(.venv/Scripts/python.exe -c \"from playwright.sync_api import sync_playwright; print\\('playwright import OK'\\)\")",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_browser_import.py -q)",
+      "Bash(.venv/Scripts/python.exe -m job_agent.main import-browser --help)",
+      "Bash(timeout 70 .venv/Scripts/python.exe -c ' *)",
+      "Bash(grep -vE \"^\\\\s*$\")",
+      "Bash(timeout 120 .venv/Scripts/python.exe -c ' *)",
+      "Bash(.venv/Scripts/python.exe -m pip install litellm)"
     ]
   }
 }

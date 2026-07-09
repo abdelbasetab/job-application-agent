@@ -6,6 +6,11 @@ APIs as CrewAI tools and asks the LLM to call them, combine, and dedup.
 The local LLM (qwen2.5:7b via Ollama) only orchestrates — it MUST NOT
 invent postings. If both APIs return empty, run_scout raises so callers
 fail loudly instead of silently producing nothing.
+
+CrewAI is imported **lazily** inside the functions that need it: the offline
+demo, the deterministic ``--direct`` Scout, and the whole test suite work on
+machines where CrewAI is not installed at all. Only the live agent path
+(``run_scout`` → ``_run_crew_scout``) touches the heavy dependency.
 """
 
 from __future__ import annotations
@@ -13,48 +18,54 @@ from __future__ import annotations
 import json
 import os
 from functools import lru_cache
-from typing import Any
-
-from crewai import LLM, Agent, Crew, Task
-from crewai.tools import tool
+from typing import TYPE_CHECKING, Any
 
 from job_agent.schemas import JobPosting, UserProfile
 from job_agent.tools.job_search import adzuna_search, ba_jobsuche_search, search_all
 from job_agent.utils.config import settings
 from job_agent.utils.logging import get_logger
 
+if TYPE_CHECKING:  # only for type hints — never triggers the heavy import
+    from crewai import LLM, Agent
+
 log = get_logger(__name__)
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# CrewAI tools — thin wrappers around tools/job_search.py
+# CrewAI tools — thin wrappers around tools/job_search.py (built lazily)
 # ────────────────────────────────────────────────────────────────────────────
-@tool("adzuna_search")
-def adzuna_tool(query: str, location: str = "Germany", limit: int = 10) -> str:
-    """Search Adzuna for open positions in Germany.
+@lru_cache(maxsize=1)
+def _build_tools() -> tuple[Any, Any]:
+    """Create the CrewAI tool wrappers on first use (imports crewai)."""
+    from crewai.tools import tool
 
-    Returns a JSON array of JobPosting objects (may be empty).
-    Args:
-        query: Free-text search term (e.g. "Werkstudent KI", "Data Engineer").
-        location: City or region; defaults to all of Germany.
-        limit: Max number of postings to return (1-25).
-    """
-    postings = adzuna_search(query=query, location=location, limit=limit)
-    return json.dumps([p.model_dump(mode="json") for p in postings], default=str)
+    @tool("adzuna_search")
+    def adzuna_tool(query: str, location: str = "Germany", limit: int = 10) -> str:
+        """Search Adzuna for open positions in Germany.
 
+        Returns a JSON array of JobPosting objects (may be empty).
+        Args:
+            query: Free-text search term (e.g. "Werkstudent KI", "Data Engineer").
+            location: City or region; defaults to all of Germany.
+            limit: Max number of postings to return (1-25).
+        """
+        postings = adzuna_search(query=query, location=location, limit=limit)
+        return json.dumps([p.model_dump(mode="json") for p in postings], default=str)
 
-@tool("ba_jobsuche_search")
-def ba_tool(query: str, location: str = "", limit: int = 10) -> str:
-    """Search the German Bundesagentur für Arbeit Jobbörse.
+    @tool("ba_jobsuche_search")
+    def ba_tool(query: str, location: str = "", limit: int = 10) -> str:
+        """Search the German Bundesagentur für Arbeit Jobbörse.
 
-    Returns a JSON array of JobPosting objects (may be empty).
-    Args:
-        query: Free-text search term; German preferred.
-        location: City name, or empty for nationwide.
-        limit: Max number of postings to return (1-25).
-    """
-    postings = ba_jobsuche_search(query=query, location=location, limit=limit, enrich=True)
-    return json.dumps([p.model_dump(mode="json") for p in postings], default=str)
+        Returns a JSON array of JobPosting objects (may be empty).
+        Args:
+            query: Free-text search term; German preferred.
+            location: City name, or empty for nationwide.
+            limit: Max number of postings to return (1-25).
+        """
+        postings = ba_jobsuche_search(query=query, location=location, limit=limit, enrich=True)
+        return json.dumps([p.model_dump(mode="json") for p in postings], default=str)
+
+    return adzuna_tool, ba_tool
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -63,6 +74,8 @@ def ba_tool(query: str, location: str = "", limit: int = 10) -> str:
 @lru_cache(maxsize=1)
 def _get_llm() -> LLM:
     """Build the CrewAI LLM lazily, switching on settings.llm_provider."""
+    from crewai import LLM
+
     provider = settings.llm_provider.lower()
     model = settings.llm_model
 
@@ -100,6 +113,9 @@ def _get_llm() -> LLM:
 
 
 def _build_scout_agent() -> Agent:
+    from crewai import Agent
+
+    adzuna_tool, ba_tool = _build_tools()
     return Agent(
         role="Job Scout",
         goal=(
@@ -204,7 +220,8 @@ def run_scout(
         postings = _run_crew_scout(profile, query, limit)
     except Exception as exc:
         # Covers LLM/agent init failures (e.g. a model id litellm can't load),
-        # tool-calling not supported, or kickoff errors. Live still works below.
+        # a missing crewai install, tool-calling not supported, or kickoff
+        # errors. Live search still works below.
         log.warning(
             "[scout] CrewAI agent unavailable (%s) — using direct API search instead",
             exc,
@@ -227,6 +244,8 @@ def _run_crew_scout(
     profile: UserProfile, query: str | None = None, limit: int = 5
 ) -> list[JobPosting]:
     """Run the CrewAI agent (LLM orchestrates the search tools). May raise."""
+    from crewai import Crew, Task
+
     scout_agent = _build_scout_agent()
     search_hint = query or " ".join(profile.skills[:3])
     per_source = max(limit, 5)

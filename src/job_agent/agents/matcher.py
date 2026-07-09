@@ -1,14 +1,30 @@
 """Matcher agent - scores each posting against the user's profile.
 
-The deterministic matcher now produces a visible 1-5 rubric plus ghost-job
-risk signals. The scalar score remains 0.0..1.0 so the existing Writer and
-Tracker contracts stay stable.
+The deterministic matcher produces a visible 1-5 rubric plus ghost-job risk
+signals. The scalar score remains 0.0..1.0 so the existing Writer and Tracker
+contracts stay stable.
+
+Skill matching is three-tiered (ADR-0006):
+
+1. **Exact/alias** — ``_canonical_skill`` normalizes spellings and maps known
+   synonyms (PostgreSQL → sql).
+2. **Similarity** — near-duplicates the alias table cannot know ("python3" ≈
+   "python"). Uses the OpenAI-compatible ``/embeddings`` endpoint when
+   ``EMBEDDING_MODEL`` is configured, otherwise an offline fuzzy ratio.
+3. **LLM** — the full semantic matcher (``--llm-agents``), with tiers 1-2 as
+   the deterministic fallback.
+
+The weighted rubric is the primary score. A hard gate keeps jobs with zero
+covered must-have skills at 0.0, and risk penalties are applied last.
 """
 
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
+from difflib import SequenceMatcher
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -75,10 +91,18 @@ def run_matcher(
     """
     llm_enabled = settings.enable_llm_agents if use_llm is None else use_llm
     if llm_enabled:
-        return [
-            _run_llm_matcher(job, profile, threshold, profile_context)
-            for job in jobs
-        ]
+        runner = partial(
+            _run_llm_matcher,
+            profile=profile,
+            threshold=threshold,
+            profile_context=profile_context,
+        )
+        if len(jobs) <= 1:
+            return [runner(job) for job in jobs]
+        # One LLM call per job — run them concurrently, keep the input order.
+        workers = min(4, len(jobs))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            return list(pool.map(runner, jobs))
     return [_run_deterministic_match(job, profile) for job in jobs]
 
 
@@ -89,6 +113,13 @@ def _run_deterministic_match(job: JobPosting, profile: UserProfile) -> MatchResu
 
     matched = sorted(required & profile_skills)
     missing = sorted(required - profile_skills)
+
+    # Tier 2: similarity matching for requirements tier 1 could not cover.
+    similar_pairs = _similar_skill_matches(missing, profile_skills)
+    if similar_pairs:
+        matched = sorted(set(matched) | set(similar_pairs))
+        missing = [skill for skill in missing if skill not in similar_pairs]
+
     risk_flags, risk_level = _ghost_job_risk(job)
     components = _score_components(
         job=job,
@@ -100,14 +131,21 @@ def _run_deterministic_match(job: JobPosting, profile: UserProfile) -> MatchResu
         profile_skills=profile_skills,
         risk_flags=risk_flags,
         risk_level=risk_level,
+        similar_pairs=similar_pairs,
     )
 
-    legacy_score = _legacy_skill_score(matched, required, nice, profile_skills)
-    rubric_score = _weighted_score(components)
+    # The weighted rubric is the score (ADR-0006). Hard gate: a posting whose
+    # must-have skills are all uncovered stays at 0.0 regardless of the softer
+    # dimensions; the risk penalty is applied on top.
     if required and not matched:
         score = 0.0
     else:
-        score = max(legacy_score, rubric_score)
+        score = _weighted_score(components)
+        # Level mismatch is a soft K.o.: a clearly senior role cannot become a
+        # top recommendation for a student profile just because skills overlap.
+        seniority = next(c for c in components if c.key == "seniority")
+        if seniority.score <= 2:
+            score = min(score, _SENIOR_MISMATCH_CAP)
     score = _apply_risk_penalty(score, risk_level)
     recommendation = _recommendation(score, risk_level)
     score_summary = _score_summary(job, matched, required, risk_level, recommendation)
@@ -153,7 +191,9 @@ def _run_llm_matcher(
                         f"{json.dumps(user_payload, ensure_ascii=False)}"
                     ),
                 },
-            ]
+            ],
+            schema=MatchResult,
+            schema_name="MatchResult",
         )
         result = _parse_match(raw, expected_job_id=job.id)
         log.info("[matcher:llm] %s -> score=%.2f", job.id, result.score)
@@ -216,6 +256,7 @@ def _score_components(
     profile_skills: set[str],
     risk_flags: list[str],
     risk_level: RiskLevel,
+    similar_pairs: dict[str, str] | None = None,
 ) -> list[ScoreComponent]:
     hard_score = _ratio_to_1_5(len(matched) / len(required)) if required else 3
     hard_evidence = (
@@ -223,6 +264,9 @@ def _score_components(
         if required
         else "Keine strukturierten Muss-Skills im Inserat erkannt."
     )
+    if similar_pairs:
+        pairs = ", ".join(f"{req} ≈ {have}" for req, have in sorted(similar_pairs.items()))
+        hard_evidence += f" Ähnlich erkannt: {pairs}."
     if missing:
         hard_evidence += f" Fehlend: {', '.join(missing)}."
 
@@ -380,15 +424,75 @@ def _quality_component(risk_flags: list[str], risk_level: RiskLevel) -> tuple[in
     return 5, "Inserat wirkt konkret und risikoarm."
 
 
-def _legacy_skill_score(
-    matched: list[str],
-    required: set[str],
-    nice: set[str],
-    profile_skills: set[str],
-) -> float:
-    base = len(matched) / max(len(required), 1)
-    bonus = 0.1 if (nice & profile_skills) else 0.0
-    return min(base + bonus, 1.0)
+# Tier-2 thresholds: fuzzy ratio is strict on purpose (near-duplicates only,
+# "python3" ≈ "python"); embedding cosine may bridge real paraphrases.
+_FUZZY_RATIO_MIN = 0.84
+_EMBED_COSINE_MIN = 0.75
+# A posting whose level clearly mismatches the profile (seniority score <= 2)
+# is capped below the "good" band — it can stay a maybe, never a strong.
+_SENIOR_MISMATCH_CAP = 0.55
+
+
+def _similar_skill_matches(missing: list[str], profile_skills: set[str]) -> dict[str, str]:
+    """Tier-2 skill matching — maps still-missing requirements to close profile skills.
+
+    Uses the OpenAI-compatible ``/embeddings`` endpoint (semantic similarity)
+    when ``EMBEDDING_MODEL`` is configured; otherwise a deterministic, offline
+    fuzzy string ratio. Returns ``{required_skill: profile_skill}``.
+    """
+    if not missing or not profile_skills:
+        return {}
+    if settings.embedding_model and settings.llm_base_url:
+        try:
+            return _embedding_matches(missing, sorted(profile_skills))
+        except Exception as exc:
+            log.warning("[matcher] embedding tier unavailable, using fuzzy ratio: %s", exc)
+    return _fuzzy_matches(missing, profile_skills)
+
+
+def _fuzzy_matches(missing: list[str], profile_skills: set[str]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for req in missing:
+        best, best_ratio = "", 0.0
+        for have in profile_skills:
+            ratio = SequenceMatcher(None, req, have).ratio()
+            if ratio > best_ratio:
+                best, best_ratio = have, ratio
+        if best and best_ratio >= _FUZZY_RATIO_MIN:
+            result[req] = best
+    return result
+
+
+def _embedding_matches(missing: list[str], have: list[str]) -> dict[str, str]:
+    from job_agent.memory.profile_index import KIConnectEmbeddingFunction
+
+    embed = KIConnectEmbeddingFunction(
+        model=settings.embedding_model,
+        base_url=settings.llm_base_url or "",
+        api_key=settings.llm_api_key,
+    )
+    vectors = embed(missing + have)
+    missing_vecs, have_vecs = vectors[: len(missing)], vectors[len(missing) :]
+
+    result: dict[str, str] = {}
+    for req, req_vec in zip(missing, missing_vecs, strict=True):
+        best, best_sim = "", 0.0
+        for skill, skill_vec in zip(have, have_vecs, strict=True):
+            sim = _cosine(req_vec, skill_vec)
+            if sim > best_sim:
+                best, best_sim = skill, sim
+        if best and best_sim >= _EMBED_COSINE_MIN:
+            result[req] = best
+    return result
+
+
+def _cosine(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b, strict=True))
+    norm_a = sum(x * x for x in a) ** 0.5
+    norm_b = sum(y * y for y in b) ** 0.5
+    if not norm_a or not norm_b:
+        return 0.0
+    return float(dot / (norm_a * norm_b))
 
 
 def _weighted_score(components: list[ScoreComponent]) -> float:

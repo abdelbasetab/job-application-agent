@@ -103,7 +103,12 @@ def test_pipeline_runs_end_to_end(tmp_path: Path, mocked_scout: list[JobPosting]
 def test_matcher_skill_overlap_scoring(
     tmp_path: Path, mocked_scout: list[JobPosting]
 ) -> None:
-    """Matcher must score 1.0 when every requirement is matched."""
+    """Full requirement coverage scores high — but not an automatic 1.0.
+
+    Since ADR-0006 the weighted rubric is the primary score: location,
+    language and posting quality still weigh in even when every must-have
+    skill is covered. Zero coverage stays hard-gated at 0.0.
+    """
     store = Store(tmp_path / "test.db")
     profile = UserProfile(
         name="x",
@@ -111,11 +116,17 @@ def test_matcher_skill_overlap_scoring(
         email="x@example.com",
         location="Berlin",
         languages={"de": "C1"},
-        skills=["python", "llms", "git", "sql", "machine learning", "airflow"],
+        skills=["python", "llms", "git", "sql", "machine learning"],
     )
-    result = run_pipeline(profile=profile, store=store, match_threshold=0.99)
-    # fake-2's requirements (python, llms, git, sql) are fully covered.
-    assert any(m.score >= 0.99 for m in result.matches)
+    result = run_pipeline(profile=profile, store=store, match_threshold=0.3)
+    by_id = {m.job_id: m for m in result.matches}
+
+    # fake-1 (python, git) and fake-2 (python, llms, git, sql) are fully covered.
+    assert by_id["fake-1"].score >= 0.85
+    assert by_id["fake-2"].score >= 0.85
+    assert by_id["fake-1"].score < 1.0, "rubric must keep soft dimensions visible"
+    # fake-3 (rust, tokio, wasm) has zero coverage -> hard gate.
+    assert by_id["fake-3"].score == 0.0
     store.close()
 
 

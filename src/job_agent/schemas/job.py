@@ -17,7 +17,9 @@ class JobPosting(BaseModel):
     """
 
     id: str = Field(description="Stable hash of (source, source_id) — used for dedup.")
-    source: Literal["adzuna", "ba-jobsuche", "stepstone", "linkedin", "manual"]
+    source: Literal[
+        "adzuna", "ba-jobsuche", "stepstone", "linkedin", "indeed", "xing", "manual"
+    ]
     source_id: str = Field(description="The id assigned by the source board.")
     url: HttpUrl
 

@@ -43,7 +43,7 @@ def _fake_reply() -> str:
 
 
 def test_run_profiler_parses_and_normalizes(monkeypatch):
-    monkeypatch.setattr(profiler, "call_llm", lambda messages: _fake_reply())
+    monkeypatch.setattr(profiler, "call_llm", lambda messages, **_kw: _fake_reply())
     profile = profiler.run_profiler("some cv text")
     assert isinstance(profile, UserProfile)
     assert profile.name == "Test Candidate"
@@ -54,13 +54,13 @@ def test_run_profiler_parses_and_normalizes(monkeypatch):
 
 def test_run_profiler_strips_code_fences(monkeypatch):
     fenced = "```json\n" + _fake_reply() + "\n```"
-    monkeypatch.setattr(profiler, "call_llm", lambda messages: fenced)
+    monkeypatch.setattr(profiler, "call_llm", lambda messages, **_kw: fenced)
     assert profiler.run_profiler("cv").name == "Test Candidate"
 
 
 def test_run_profiler_handles_surrounding_prose(monkeypatch):
     noisy = "Here is the profile you asked for:\n" + _fake_reply() + "\nHope it helps!"
-    monkeypatch.setattr(profiler, "call_llm", lambda messages: noisy)
+    monkeypatch.setattr(profiler, "call_llm", lambda messages, **_kw: noisy)
     assert profiler.run_profiler("cv").headline == "Werkstudent KI"
 
 
@@ -74,7 +74,7 @@ def test_run_profiler_backfills_missing_headline(monkeypatch):
         "experience": [{"role": "Data Intern", "company": "Z", "start": "2024-01"}],
         "education": [],
     }
-    monkeypatch.setattr(profiler, "call_llm", lambda messages: json.dumps(data))
+    monkeypatch.setattr(profiler, "call_llm", lambda messages, **_kw: json.dumps(data))
     assert profiler.run_profiler("cv").headline == "Data Intern"
 
 
@@ -84,7 +84,7 @@ def test_run_profiler_empty_text_raises():
 
 
 def test_run_profiler_rejects_non_json(monkeypatch):
-    monkeypatch.setattr(profiler, "call_llm", lambda messages: "sorry, I cannot help")
+    monkeypatch.setattr(profiler, "call_llm", lambda messages, **_kw: "sorry, I cannot help")
     with pytest.raises(ValueError):
         profiler.run_profiler("cv")
 

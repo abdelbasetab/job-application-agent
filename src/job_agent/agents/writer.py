@@ -2,6 +2,13 @@
 
 Sprint 3 adds an optional LLM writer. The template writer remains as a
 fallback so demos do not fail when the configured LLM is unavailable.
+
+The LLM path is agentic in the small: after drafting, the Writer runs its
+deterministic ``quality_checks`` (name present, job title mentioned, length,
+no placeholders, no forbidden filler phrases). If any check fails, the failed
+checks are fed back to the LLM for **one** self-correction pass, and the
+better of the two attempts wins. The loop is bounded so a weak model cannot
+burn tokens indefinitely.
 """
 
 from __future__ import annotations
@@ -42,6 +49,19 @@ würde ich mich sehr freuen.
 Mit freundlichen Grüßen
 {name}
 """
+
+# Filler phrases a strong German cover letter must not contain. Checked
+# case-insensitively; the list is deliberately short and unambiguous.
+_FORBIDDEN_PHRASES: tuple[str, ...] = (
+    "hiermit bewerbe ich mich",
+    "ich bewerbe mich hiermit",
+    "wie in ihrer anzeige beschrieben",
+    "ich bin ein teamplayer",
+    "belastbar und flexibel",
+    "einzigartige gelegenheit",
+    "als hochmotivierter bewerber",
+    "i am writing to apply",
+)
 
 
 def run_writer(
@@ -117,10 +137,77 @@ def _run_llm_writer(
                     f"{json.dumps(user_payload, ensure_ascii=False)}"
                 ),
             },
-        ]
+        ],
+        schema=GeneratedApplication,
+        schema_name="GeneratedApplication",
     )
     app = _parse_application(raw, expected_job_id=job.id)
     app.quality_checks = _quality_checks(app.cover_letter_md, job, profile)
+
+    failed = [name for name, passed in app.quality_checks.items() if not passed]
+    if failed:
+        app = _revise_application(app, failed, prompt, job, profile)
+    return app
+
+
+# Human-readable German fix instructions per failed quality check.
+_CHECK_HINTS = {
+    "name_correct": "Der Name des Kandidaten ({name}) muss im Brief vorkommen.",
+    "no_placeholders": "Entferne alle Platzhalter wie {{{{...}}}} — nur fertiger Text.",
+    "length_ok": "Halte 250-350 Wörter ein (mindestens 200, höchstens 4000 Zeichen).",
+    "mentions_job_title": "Der Jobtitel „{title}“ muss wörtlich im Brief stehen.",
+    "no_sprint_note": "Keine internen Notizen oder Debug-Hinweise im Brief.",
+    "no_forbidden_phrases": (
+        "Vermeide Floskeln wie „hiermit bewerbe ich mich“ oder „Teamplayer“ — "
+        "formuliere konkret und individuell."
+    ),
+}
+
+
+def _revise_application(
+    app: GeneratedApplication,
+    failed: list[str],
+    system_prompt: str,
+    job: JobPosting,
+    profile: UserProfile,
+) -> GeneratedApplication:
+    """One bounded self-correction pass: feed failed checks back to the LLM.
+
+    Never raises — if the revision call fails or is worse than the original
+    draft, the original draft (with its honest check flags) is kept.
+    """
+    hints = "\n".join(
+        "- " + _CHECK_HINTS.get(name, name).format(name=profile.name, title=job.title)
+        for name in failed
+    )
+    log.info("[writer:llm] self-correction for %s — failed checks: %s", app.job_id, failed)
+    try:
+        raw = call_llm(
+            [
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": (
+                        "Dein Entwurf hat interne Qualitätschecks verletzt. Überarbeite ihn.\n"
+                        f"Verletzte Checks:\n{hints}\n\n"
+                        "Bisheriger Entwurf:\n"
+                        f"{app.cover_letter_md}\n\n"
+                        "Return only one JSON object matching GeneratedApplication."
+                    ),
+                },
+            ],
+            schema=GeneratedApplication,
+            schema_name="GeneratedApplication",
+        )
+        revised = _parse_application(raw, expected_job_id=app.job_id)
+        revised.quality_checks = _quality_checks(revised.cover_letter_md, job, profile)
+    except Exception as exc:
+        log.warning("[writer:llm] self-correction failed for %s: %s", app.job_id, exc)
+        return app
+
+    if sum(revised.quality_checks.values()) >= sum(app.quality_checks.values()):
+        log.info("[writer:llm] self-correction accepted for %s", app.job_id)
+        return revised
     return app
 
 
@@ -181,10 +268,12 @@ def _quality_checks(
     job: JobPosting,
     profile: UserProfile,
 ) -> dict[str, bool]:
+    lowered = letter.lower()
     return {
-        "name_correct": profile.name.lower() in letter.lower(),
+        "name_correct": profile.name.lower() in lowered,
         "no_placeholders": "{{" not in letter and "}}" not in letter,
         "length_ok": 200 <= len(letter) <= 4000,
-        "mentions_job_title": job.title.lower() in letter.lower(),
+        "mentions_job_title": job.title.lower() in lowered,
         "no_sprint_note": "Sprint-1 template draft" not in letter,
+        "no_forbidden_phrases": not any(phrase in lowered for phrase in _FORBIDDEN_PHRASES),
     }

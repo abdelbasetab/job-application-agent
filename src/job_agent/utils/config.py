@@ -68,6 +68,14 @@ class Settings:
         "yes",
         "on",
     }
+    # Use the optional Playwright browser fallback when the light HTTP liveness
+    # check is inconclusive. Needs `pip install playwright && playwright install`.
+    liveness_deep: bool = os.getenv("LIVENESS_DEEP", "false").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
     # Optional real embeddings via the OpenAI-compatible gateway (e.g. KI-Connect).
     # A model the gateway exposes, e.g. "Qwen 3 Embedding 8B".
@@ -114,6 +122,26 @@ class Settings:
         "on",
     }
     email_sync_limit: int = int(os.getenv("EMAIL_SYNC_LIMIT", "50"))
+    email_auto_follow_up_send: bool = os.getenv("EMAIL_AUTO_FOLLOW_UP_SEND", "false").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    email_autopilot_interval_minutes: int = int(
+        os.getenv("EMAIL_AUTOPILOT_INTERVAL_MINUTES", "15")
+    )
+    email_oauth_redirect_base: str | None = os.getenv("EMAIL_OAUTH_REDIRECT_BASE") or None
+    email_oauth_google_client_id: str | None = os.getenv("EMAIL_OAUTH_GOOGLE_CLIENT_ID") or None
+    email_oauth_google_client_secret: str | None = (
+        os.getenv("EMAIL_OAUTH_GOOGLE_CLIENT_SECRET") or None
+    )
+    email_oauth_microsoft_client_id: str | None = (
+        os.getenv("EMAIL_OAUTH_MICROSOFT_CLIENT_ID") or None
+    )
+    email_oauth_microsoft_client_secret: str | None = (
+        os.getenv("EMAIL_OAUTH_MICROSOFT_CLIENT_SECRET") or None
+    )
 
     @property
     def llm_api_key(self) -> str | None:
@@ -153,6 +181,21 @@ class Settings:
             warnings.append(
                 "EMAIL_SYNC_DRY_RUN=false, aber IMAP-Zugangsdaten sind unvollständig — "
                 "Inbox-Sync schlägt fehl."
+            )
+        if self.email_auto_follow_up_send and self.email_dry_run:
+            warnings.append(
+                "EMAIL_AUTO_FOLLOW_UP_SEND=true, aber EMAIL_DRY_RUN=true - "
+                "Autopilot bereitet Follow-ups nur als Dry-run vor."
+            )
+        if self.email_auto_follow_up_send and not self.email_dry_run:
+            warnings.append(
+                "EMAIL_AUTO_FOLLOW_UP_SEND=true und EMAIL_DRY_RUN=false - "
+                "Autopilot darf echte Follow-up-E-Mails senden."
+            )
+        if self.email_autopilot_interval_minutes < 5:
+            warnings.append(
+                "EMAIL_AUTOPILOT_INTERVAL_MINUTES ist unter 5 - "
+                "geplante Inbox-Syncs sollten nicht zu haeufig laufen."
             )
         if self.web_secure_cookies and self.web_host in {"127.0.0.1", "localhost"}:
             warnings.append(

@@ -52,7 +52,9 @@ def run_profiler(cv_text: str) -> UserProfile:
         [
             {"role": "system", "content": prompt},
             {"role": "user", "content": f"CV text:\n\n{cv_text.strip()}"},
-        ]
+        ],
+        schema=UserProfile,
+        schema_name="UserProfile",
     )
     data = _parse_json_object(raw)
     profile = UserProfile.model_validate(_coerce_profile_dict(data))
@@ -86,9 +88,11 @@ def _coerce_profile_dict(data: dict[str, Any]) -> dict[str, Any]:
     """Filter to known keys, normalize skills, and backfill required fields.
 
     UserProfile uses ``extra = "forbid"``, so unknown keys from the LLM would
-    otherwise raise. We also harden against minor omissions in the LLM output.
+    otherwise raise. We also harden against minor omissions in the LLM output:
+    ``None`` values (e.g. ``"email": null`` from structured output) are dropped
+    so the field defaults/backfills below apply instead of failing validation.
     """
-    out: dict[str, Any] = {k: v for k, v in data.items() if k in _PROFILE_KEYS}
+    out: dict[str, Any] = {k: v for k, v in data.items() if k in _PROFILE_KEYS and v is not None}
 
     raw_skills = out.get("skills")
     if isinstance(raw_skills, list):
@@ -106,12 +110,39 @@ def _coerce_profile_dict(data: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(out.get("languages"), dict):
         out["languages"] = {}
 
+    if "experience" in out:
+        out["experience"] = _clean_entries(out["experience"])
+    if "education" in out:
+        out["education"] = _clean_entries(out["education"])
+
     out.setdefault("name", "Unknown Candidate")
     out.setdefault("email", "")
     out.setdefault("location", "")
     if not out.get("headline"):
         out["headline"] = _derive_headline(out)
     return out
+
+
+def _clean_entries(value: Any) -> list[dict[str, Any]]:
+    """Sanitize experience/education rows: null -> '' (or [] for skill lists).
+
+    Structured LLM output often emits ``null`` for absent nested fields (e.g.
+    ``start``), which the required string fields on Experience/Education reject.
+    """
+    if not isinstance(value, list):
+        return []
+    cleaned: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        entry: dict[str, Any] = {}
+        for key, val in item.items():
+            if val is None:
+                entry[key] = [] if key == "skills_used" else ""
+            else:
+                entry[key] = val
+        cleaned.append(entry)
+    return cleaned
 
 
 def _derive_headline(out: dict[str, Any]) -> str:

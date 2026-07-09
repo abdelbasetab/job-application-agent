@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 from job_agent.memory.store import Store
-from job_agent.schemas import GeneratedApplication, JobPosting
+from job_agent.schemas import ApplicationStatus, GeneratedApplication, JobPosting
 from job_agent.tools.email_sync import (
     InboxMessage,
     classify_message,
@@ -72,3 +72,40 @@ def test_sync_messages_updates_status_when_not_dry_run(tmp_path: Path) -> None:
     assert status is not None
     assert status.status == "interview"
     assert "Inbox: interview erkannt" in status.notes
+
+
+def test_sync_messages_falls_back_to_single_active_application(tmp_path: Path) -> None:
+    store = Store(tmp_path / "sync-fallback.db")
+    job = _job()
+    store.save_job(job)
+    store.save_application(
+        GeneratedApplication(
+            job_id=job.id,
+            cover_letter_md="Bewerbung",
+            generated_at=date.today(),
+        )
+    )
+    store.upsert_status(
+        ApplicationStatus(
+            job_id=job.id,
+            status="submitted",
+            submitted_at=datetime.now(),
+        )
+    )
+    message = InboxMessage(
+        uid="2",
+        sender="miriam.schneider@recruiting.test",
+        subject="Einladung",
+        body="Vielen Dank fuer Ihre Bewerbung. Wir moechten Sie gerne zu einem Interview einladen.",
+    )
+
+    result = sync_messages(store, [message], dry_run=False)
+    status = store.get_status(job.id)
+    store.close()
+
+    assert result["seen"] == 1
+    assert result["classified"] == 1
+    assert result["matched"] == 1
+    assert result["updates"][0]["match_method"] == "tracked_application"
+    assert status is not None
+    assert status.status == "interview"

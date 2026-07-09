@@ -31,6 +31,16 @@ htmlcov/
 .tox/
 .mypy_cache/
 .ruff_cache/
+tmp_pytest*/
+data_full_reset_backup_*/
+web_server*.log
+Abschlusspraesentation_*.html
+Abschlusspraesentation_*.pptx
+Demo_*.html
+Demo_*.pdf
+Demo_Video_Storyboard.html
+Live_Demo_Runbook.html
+data/pytest-tmp/
 
 # Project secrets and data
 .env
@@ -38,8 +48,8 @@ htmlcov/
 data/jobs/*.json
 data/applications/*.md
 data/applications/*.pdf
-\!data/jobs/.gitkeep
-\!data/applications/.gitkeep
+!data/jobs/.gitkeep
+!data/applications/.gitkeep
 
 # Local DBs (incl. WAL side-files) and per-user data
 *.db

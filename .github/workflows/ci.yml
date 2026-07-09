@@ -34,5 +34,25 @@ jobs:
       - name: Mypy (types)
         run: mypy src
 
-      - name: Pytest (offline suite)
-        run: pytest
+      - name: Pytest (offline suite + coverage floor)
+        run: pytest --cov=job_agent --cov-report=term-missing --cov-fail-under=60
+
+      - name: Matcher quality gate (golden-set eval)
+        run: python -m job_agent.main eval --json-out eval_report.json
+
+      - name: Upload eval report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-report
+          path: eval_report.json
+          if-no-files-found: ignore
+
+  docker-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t job-agent:ci .

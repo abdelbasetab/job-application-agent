@@ -20,6 +20,9 @@ dependencies = [
     # Agents (added once Scout is implemented; safe to install now)
     "crewai>=0.51",
     "crewai-tools>=0.8",
+    # LiteLLM powers CrewAI's LLM routing (needed for non-native models like
+    # the KI-Connect 'Mistral Small 4 119B' via the openai-compatible gateway).
+    "litellm>=1.40",
 
     # LLM clients (Sprint 1 uses one; Sprint 2 adds more)
     "openai>=1.30",
@@ -32,6 +35,9 @@ dependencies = [
     "pymupdf>=1.24",
     "python-docx>=1.1",
     "pyyaml>=6.0",
+
+    # PDF export (German application package) — lightweight, pure Python
+    "fpdf2>=2.7",
 ]
 
 [project.optional-dependencies]
@@ -40,6 +46,11 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.4",
     "mypy>=1.10",
+]
+# Optional: assisted browser import for login-gated boards (Indeed/StepStone/XING).
+# After install run: playwright install chromium
+browser = [
+    "playwright>=1.40",
 ]
 
 [project.scripts]
@@ -73,3 +84,10 @@ python_version = "3.11"
 strict = true
 warn_unused_ignores = true
 ignore_missing_imports = true
+
+# CrewAI ships no type stubs and is imported lazily — its decorator/typing
+# noise depends on whether the package is installed, so silence exactly the
+# affected codes in exactly this module (everything else stays strict).
+[[tool.mypy.overrides]]
+module = "job_agent.agents.scout"
+disable_error_code = ["untyped-decorator", "unused-ignore"]

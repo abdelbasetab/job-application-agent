@@ -6,9 +6,13 @@ import hashlib
 import hmac
 import secrets
 import sqlite3
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TypedDict
+
+# `datetime.UTC` is 3.11+ — the timezone.utc spelling keeps the module
+# importable on older interpreters (CI matrix, constrained environments).
+UTC = timezone.utc  # noqa: UP017
 
 
 class AuthUser(TypedDict):

@@ -46,3 +46,27 @@ class ApplicationStatus(BaseModel):
     notes: str = ""
 
     model_config = {"extra": "forbid"}
+
+
+class FollowUpItem(BaseModel):
+    """A submitted application that is due for a polite follow-up nudge.
+
+    Computed by the Tracker from persisted statuses — nothing is stored; the
+    clock resets whenever ``updated_at`` changes (e.g. after recording a
+    follow-up or any status change).
+    """
+
+    job_id: str
+    title: str = ""
+    company: str = ""
+    status: ApplicationStage = "submitted"
+    submitted_at: datetime | None = None
+    last_activity: datetime
+    days_since_activity: int = Field(ge=0)
+    days_overdue: int = Field(ge=0, description="Days past the follow-up window.")
+    suggested_email_md: str = Field(
+        default="",
+        description="Ready-to-send German follow-up email draft (Markdown).",
+    )
+
+    model_config = {"extra": "forbid"}

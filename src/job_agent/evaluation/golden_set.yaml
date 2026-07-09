@@ -1,0 +1,422 @@
+# Golden set for `job-agent eval` — 24 job postings with human ground-truth
+# labels relative to the baked-in demo profile (see demo_profile.py).
+#
+# expected: strong | good | maybe | skip   (human judgment, NOT matcher output)
+# posted_days_ago: relative age, resolved to posted_at at load time so
+#                  age-based risk cases never go stale.
+#
+# Some cases are deliberate borderline cases (see notes) — the eval is meant
+# to surface where the deterministic rubric and human judgment diverge.
+
+- job:
+    id: gold-01
+    source: manual
+    source_id: gold-01
+    url: https://example.de/golden/g01
+    title: Werkstudent KI (m/w/d)
+    company: RuhrTech GmbH
+    location: Gelsenkirchen
+    description: >-
+      Du unterstützt unser Team beim Aufbau von LLM-Anwendungen für
+      Industriekunden. Sehr gute Deutschkenntnisse sind erwünscht, die
+      Dokumentation entsteht auf Deutsch. Flexible Arbeitszeiten neben dem
+      Studium.
+    requirements: [python, llms]
+    nice_to_have: [rag]
+    employment_type: working-student
+    remote: false
+  expected: strong
+  note: "Volltreffer: Skills, Standort, Jobtyp und Sprache passen."
+
+- job:
+    id: gold-02
+    source: manual
+    source_id: gold-02
+    url: https://example.de/golden/g02
+    title: Data Engineer (Vollzeit)
+    company: Isar Analytics
+    location: München
+    description: >-
+      Sie entwickeln und betreiben Datenpipelines für unsere Kunden in
+      München. Präsenz im Büro an drei Tagen pro Woche wird erwartet. Sehr
+      gute Deutschkenntnisse setzen wir voraus.
+    requirements: [python, sql]
+    employment_type: full-time
+  expected: good
+  note: >-
+    Bewusster Grenzfall: Skills perfekt, aber Vollzeit in München passt nicht
+    zum Studierendenprofil — ein Mensch stuft das eher herab.
+
+- job:
+    id: gold-03
+    source: manual
+    source_id: gold-03
+    url: https://example.de/golden/g03
+    title: Werkstudent Cloud Platform
+    company: Emscher Cloud AG
+    location: Essen
+    description: >-
+      Du automatisierst Deployments und hilfst dem Platform-Team bei
+      Container-Workflows. Gute Deutschkenntnisse sind hilfreich, das Team
+      arbeitet zweisprachig. Einsatz neben dem Studium mit 15-20 Stunden pro
+      Woche.
+    requirements: [python, kubernetes, docker]
+    employment_type: working-student
+  expected: good
+  note: "Nur ein Muss-Skill gedeckt, aber Stadt/Jobtyp stimmen."
+
+- job:
+    id: gold-04
+    source: manual
+    source_id: gold-04
+    url: https://example.de/golden/g04
+    title: Embedded Systems Engineer
+    company: Signalwerk GmbH
+    location: Bochum
+    description: >-
+      Sie entwickeln Firmware für Sensorik im industriellen Umfeld und
+      arbeiten eng mit der Hardware-Abteilung zusammen. Erfahrung mit
+      Echtzeitsystemen wird vorausgesetzt.
+    requirements: [rust, embedded c]
+    employment_type: full-time
+  expected: skip
+  note: "Null Skill-Überlappung — Hard Gate."
+
+- job:
+    id: gold-05
+    source: manual
+    source_id: gold-05
+    url: https://example.de/golden/g05
+    title: Senior AI Lead (m/w/d)
+    company: Hansa AI Group
+    location: Gelsenkirchen
+    description: >-
+      Als Senior Lead verantworten Sie Architektur und Teamführung für unsere
+      KI-Produkte. Mindestens acht Jahre Berufserfahrung im
+      Machine-Learning-Umfeld werden vorausgesetzt. Sehr gute
+      Deutschkenntnisse erforderlich.
+    requirements: [python, llms]
+    employment_type: full-time
+  expected: maybe
+  note: "Level-Mismatch: Skills passen, Seniorität nicht (Cap greift)."
+
+- job:
+    id: gold-06
+    source: manual
+    source_id: gold-06
+    url: https://example.de/golden/g06
+    title: Geld verdienen von zu Hause
+    company: Unbekannt
+    location: Remote
+    description: >-
+      Schnell Geld verdienen ohne Vorkenntnisse! Kontakt nur über WhatsApp.
+      Vorkasse für Starterpaket erforderlich, danach passives Einkommen
+      garantiert.
+    requirements: []
+  expected: skip
+  note: "Scam-Signale: WhatsApp, Vorkasse, passives Einkommen."
+
+- job:
+    id: gold-07
+    source: manual
+    source_id: gold-07
+    url: https://example.de/golden/g07
+    title: Projektassistenz
+    company: Vertraulich
+    location: Dortmund
+    description: Unterstützung im Projektbüro.
+    requirements: []
+    posted_days_ago: 130
+  expected: skip
+  note: "Ghost-Job-Muster: uralt, anonym, inhaltsleer."
+
+- job:
+    id: gold-08
+    source: manual
+    source_id: gold-08
+    url: https://example.de/golden/g08
+    title: Werkstudent RAG Systeme (remote)
+    company: NordAI GmbH
+    location: Remote
+    description: >-
+      Du baust Retrieval-Augmented-Generation-Prototypen für unsere
+      Wissensdatenbank und evaluierst Embedding-Modelle. Arbeit komplett
+      remote möglich, Team-Sprache ist Deutsch.
+    requirements: [rag, llms]
+    nice_to_have: [chromadb]
+    employment_type: working-student
+    remote: true
+  expected: strong
+  note: "Kernkompetenz-Treffer, Remote erlaubt."
+
+- job:
+    id: gold-09
+    source: manual
+    source_id: gold-09
+    url: https://example.de/golden/g09
+    title: Working Student Machine Learning
+    company: Ruhr Robotics
+    location: Dortmund
+    description: >-
+      You will support our perception team with model training and evaluation
+      pipelines. Fluent English is required for daily collaboration, and all
+      documentation happens in English.
+    requirements: [python, machine learning]
+    employment_type: working-student
+  expected: strong
+  note: "Englischsprachige Rolle — Sprachanforderung wird erfüllt."
+
+- job:
+    id: gold-10
+    source: manual
+    source_id: gold-10
+    url: https://example.de/golden/g10
+    title: Praktikum Machine Learning
+    company: Westfalen Data
+    location: Dortmund
+    description: >-
+      Im Praktikum trainierst und evaluierst du Klassifikationsmodelle auf
+      realen Produktionsdaten. Gute Deutschkenntnisse sind für die
+      Team-Kommunikation wichtig, Dauer drei bis sechs Monate.
+    requirements: [machine learning, python]
+    nice_to_have: [docker]
+    employment_type: internship
+  expected: strong
+  note: "Praktikum entspricht den Präferenzen, Skills passen."
+
+- job:
+    id: gold-11
+    source: manual
+    source_id: gold-11
+    url: https://example.de/golden/g11
+    title: Werkstudent Business Intelligence
+    company: Emscher Analytics
+    location: Essen
+    description: >-
+      Du baust Reports und Dashboards für interne Stakeholder und pflegst
+      unsere Kennzahlenmodelle. Der Einsatz umfasst 16 Stunden pro Woche und
+      ist flexibel mit dem Studium kombinierbar.
+    requirements: [sql, power bi]
+    employment_type: working-student
+  expected: good
+  note: "Halbe Skill-Deckung, Rahmenbedingungen stimmen."
+
+- job:
+    id: gold-12
+    source: manual
+    source_id: gold-12
+    url: https://example.de/golden/g12
+    title: Werkstudent Datenbanken & KI
+    company: Lippe Digital
+    location: Gelsenkirchen
+    description: >-
+      Du optimierst PostgreSQL-Abfragen und integrierst LLM-Workflows in
+      bestehende Fachanwendungen. Sehr gute Deutschkenntnisse sind erwünscht,
+      wir dokumentieren auf Deutsch.
+    requirements: [PostgreSQL, LLM]
+    nice_to_have: [Chroma DB]
+    employment_type: working-student
+  expected: strong
+  note: "Testet Tier 1: Synonyme (PostgreSQL→sql, LLM→llms, Chroma DB→chromadb)."
+
+- job:
+    id: gold-13
+    source: manual
+    source_id: gold-13
+    url: https://example.de/golden/g13
+    title: Werkstudent Software
+    company: Hellweg Systems
+    location: Essen
+    description: >-
+      Du entwickelst interne Tools und unterstützt das Team bei Code-Reviews
+      und der Pflege unserer Build-Pipelines. Einsatzzeit 12 bis 18 Stunden
+      pro Woche während des Semesters.
+    requirements: [python3, gitlab]
+    employment_type: working-student
+  expected: good
+  note: "Testet Tier 2: python3 ≈ python (Fuzzy), gitlab bleibt offen."
+
+- job:
+    id: gold-14
+    source: manual
+    source_id: gold-14
+    url: https://example.de/golden/g14
+    title: Nebenjob Büro-Unterstützung
+    company: Service Partner
+    location: Gelsenkirchen
+    description: >-
+      Allgemeine Unterstützung im Büro, Aufgaben nach Absprache. Bewerbung
+      direkt im Chat.
+    requirements: []
+  expected: maybe
+  note: "Generisch und dünn, aber kein klarer Scam."
+
+- job:
+    id: gold-15
+    source: manual
+    source_id: gold-15
+    url: https://example.de/golden/g15
+    title: Werkstudent KI-Plattform
+    company: Prime AI Labs
+    location: Gelsenkirchen
+    description: >-
+      Du arbeitest an unserer KI-Plattform mit und übernimmst eigene Features
+      von der Idee bis zum Deployment. Sehr gute Deutschkenntnisse sind
+      erwünscht. Überdurchschnittliche Vergütung.
+    requirements: [python, llms]
+    employment_type: working-student
+    salary_range: [42000, 120000]
+  expected: good
+  note: >-
+    Bewusster Grenzfall: fachlich stark, aber das Gehaltsversprechen ist für
+    eine Werkstudentenstelle unrealistisch hoch.
+
+- job:
+    id: gold-16
+    source: manual
+    source_id: gold-16
+    url: https://example.de/golden/g16
+    title: Abschlussarbeit LLM-Evaluierung
+    company: Institut für KI Westfalen
+    location: Gelsenkirchen
+    description: >-
+      Im Rahmen der Abschlussarbeit evaluierst du Retrieval-Strategien für
+      dokumentenbasierte Assistenzsysteme. Betreuung erfolgt auf Deutsch,
+      Einschreibung an einer Hochschule erforderlich.
+    requirements: [llms, rag]
+    employment_type: thesis
+  expected: strong
+  note: "Thesis passt zu einem Studierendenprofil, Kernskills decken sich."
+
+- job:
+    id: gold-17
+    source: manual
+    source_id: gold-17
+    url: https://example.de/golden/g17
+    title: Fullstack Developer
+    company: Elbe Software
+    location: Hamburg
+    description: >-
+      Sie entwickeln Web-Anwendungen im ganzen Stack und stimmen sich eng mit
+      Produktmanagement und Design ab. Sehr gute Deutschkenntnisse werden
+      vorausgesetzt.
+    requirements: [python, java, spring, react]
+    employment_type: full-time
+  expected: maybe
+  note: "Nur Python gedeckt, falsche Stadt, Vollzeit."
+
+- job:
+    id: gold-18
+    source: manual
+    source_id: gold-18
+    url: https://example.de/golden/g18
+    title: Werkstudent Digitalisierung
+    company: Kreisverwaltung Emscher-Lippe
+    location: Essen
+    description: >-
+      Du unterstützt unser Digitalisierungsteam bei der Automatisierung von
+      Verwaltungsprozessen, unter anderem mit Python-Skripten und einfachen
+      Datenauswertungen. Ein Informatik-Studium ist von Vorteil, der Einsatz
+      ist flexibel planbar.
+    requirements: []
+  expected: good
+  note: "Keine strukturierten Anforderungen — Beschreibung ist aber substanziell."
+
+- job:
+    id: gold-19
+    source: manual
+    source_id: gold-19
+    url: https://example.de/golden/g19
+    title: DevOps Engineer
+    company: Rhein Cloud Services
+    location: Köln
+    description: >-
+      Sie betreiben unsere Cloud-Infrastruktur, automatisieren Deployments
+      und verantworten Monitoring und Incident-Response im Team.
+    requirements: [kubernetes, terraform, aws]
+    employment_type: full-time
+  expected: skip
+  note: "Null Skill-Überlappung — Hard Gate."
+
+- job:
+    id: gold-20
+    source: manual
+    source_id: gold-20
+    url: https://example.de/golden/g20
+    title: Werkstudent IT-Support
+    company: Bergbau Digital
+    location: Bundesweit
+    description: >-
+      Unterstützung des IT-Teams bei internen Tools und Anwenderfragen.
+    requirements: [python, docker]
+    employment_type: working-student
+    posted_days_ago: 70
+  expected: maybe
+  note: "Alt, dünn beschrieben, Standort unklar — nur prüfen, wenn Zeit ist."
+
+- job:
+    id: gold-21
+    source: manual
+    source_id: gold-21
+    url: https://example.de/golden/g21
+    title: Krypto-Trading Assistent
+    company: FastCoin
+    location: Remote
+    description: >-
+      Verdiene passives Einkommen mit unserem Crypto-Trading-Bot. Schnell
+      Geld ohne Erfahrung, keine Erfahrung notwendig, Auszahlung täglich.
+    requirements: []
+  expected: skip
+  note: "Scam-Signale: Crypto, passives Einkommen, schnelles Geld."
+
+- job:
+    id: gold-22
+    source: manual
+    source_id: gold-22
+    url: https://example.de/golden/g22
+    title: Praktikum LLM Engineering
+    company: Zeche Digital
+    location: Essen
+    description: >-
+      Du entwickelst Retrieval-Pipelines für unsere Kundenprojekte und misst
+      die Antwortqualität mit systematischen Evaluationen. Sehr gute
+      Deutschkenntnisse sind willkommen.
+    requirements: [python, rag]
+    nice_to_have: [sql]
+    employment_type: internship
+  expected: strong
+  note: "RAG-Kernrolle mit voller Skill-Deckung."
+
+- job:
+    id: gold-23
+    source: manual
+    source_id: gold-23
+    url: https://example.de/golden/g23
+    title: Werkstudent AI Engineering
+    company: Phoenix Software
+    location: Dortmund
+    description: >-
+      Du arbeitest im AI-Team an Datenaufbereitung, Prompt-Workflows und
+      kleinen Services rund um unsere Sprachmodelle. Sehr gute
+      Deutschkenntnisse sind erwünscht.
+    requirements: [python, llms, sql, git, docker]
+    employment_type: working-student
+  expected: strong
+  note: "4 von 5 Muss-Skills — in Summe klar bewerbungswürdig."
+
+- job:
+    id: gold-24
+    source: manual
+    source_id: gold-24
+    url: https://example.de/golden/g24
+    title: Data Analyst
+    company: Statistik Partner
+    location: Bundesweit
+    description: >-
+      Sie erstellen Auswertungen und Berichte für Fachabteilungen und
+      präsentieren die Ergebnisse dem Management. Reisebereitschaft innerhalb
+      des Bundesgebiets wird erwartet.
+    requirements: [sql, tableau, r]
+    employment_type: full-time
+  expected: maybe
+  note: "Nur SQL gedeckt, Vollzeit, Standort unbestimmt."

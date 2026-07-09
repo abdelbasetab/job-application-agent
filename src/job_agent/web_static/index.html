@@ -1,248 +1,494 @@
 <!doctype html>
-<html lang="de">
+<html lang="de" data-theme="light">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Job Application Agent</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%234f46e5'/%3E%3Ctext x='32' y='42' font-family='Arial,sans-serif' font-size='28' font-weight='800' fill='%23fff' text-anchor='middle'%3EJA%3C/text%3E%3C/svg%3E" />
+    <!-- SF Pro on Apple devices via the system stack; Inter as the cross-platform fallback. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
+    />
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
-    <section id="authView" class="auth-view">
-      <div class="auth-panel">
-        <div class="auth-brand">
-          <div class="brand-mark">JA</div>
-          <div>
-            <h1>Job Application Agent</h1>
-            <p>Account-Zugang für Profil, Pipeline und Tracker.</p>
-          </div>
+    <!-- ============================== AUTH ============================== -->
+    <section id="authView" class="auth">
+      <div class="auth-hero">
+        <div class="auth-logo"><span>JA</span></div>
+        <h1>Job Application Agent</h1>
+        <p class="auth-tagline">
+          Dein KI-gestützter Bewerbungs-Copilot für den deutschen Arbeitsmarkt —
+          finden, bewerten, Anschreiben, tracken.
+        </p>
+        <ul class="auth-points">
+          <li><span class="dot"></span> Erklärbares 1–5-Scoring &amp; Ghost-Job-Check</li>
+          <li><span class="dot"></span> CV-Import (PDF/OCR), CV-Check &amp; deutsche Anschreiben</li>
+          <li><span class="dot"></span> Tracker, Follow-up-Radar &amp; E-Mail-Versand</li>
+        </ul>
+      </div>
+      <div class="auth-card">
+        <div class="tabs" role="tablist" aria-label="Auth Modus">
+          <button id="loginTabBtn" class="tab is-active" type="button" role="tab">Login</button>
+          <button id="registerTabBtn" class="tab" type="button" role="tab">Registrieren</button>
         </div>
-        <div class="auth-card">
-          <div class="auth-tabs" role="group" aria-label="Auth Modus">
-            <button id="loginTabBtn" class="auth-tab active" type="button">Login</button>
-            <button id="registerTabBtn" class="auth-tab" type="button">Registrieren</button>
-          </div>
-          <form id="authForm" class="auth-form">
-            <label class="field">
-              <span>E-Mail</span>
-              <input id="authEmailInput" type="email" autocomplete="email" required />
-            </label>
-            <label class="field">
-              <span>Passwort</span>
-              <input id="authPasswordInput" type="password" autocomplete="current-password" required />
-            </label>
-            <label id="authConfirmField" class="field hidden">
-              <span>Passwort bestätigen</span>
-              <input id="authConfirmInput" type="password" autocomplete="new-password" />
-            </label>
-            <button id="authSubmitBtn" class="btn btn-primary btn-wide" type="submit">Einloggen</button>
-            <p id="authMessage" class="auth-message"></p>
-          </form>
-        </div>
+        <form id="authForm" class="stack">
+          <label class="field">
+            <span>E-Mail</span>
+            <input id="authEmailInput" type="email" autocomplete="email" placeholder="du@example.com" required />
+          </label>
+          <label class="field">
+            <span>Passwort</span>
+            <input id="authPasswordInput" type="password" autocomplete="current-password" placeholder="••••••••" required />
+          </label>
+          <label id="authConfirmField" class="field is-hidden">
+            <span>Passwort bestätigen</span>
+            <input id="authConfirmInput" type="password" autocomplete="new-password" placeholder="••••••••" />
+          </label>
+          <button id="authSubmitBtn" class="btn btn-primary btn-block" type="submit">Einloggen</button>
+          <p id="authMessage" class="form-msg" role="alert"></p>
+        </form>
       </div>
     </section>
 
-    <div id="appShell" class="app hidden">
-      <header class="topbar">
-        <div class="brand">
-          <div class="brand-mark">JA</div>
-          <div class="brand-text">
-            <strong>Job Application Agent</strong>
-            <span id="statusText">Bereit</span>
+    <!-- ============================== APP SHELL ============================== -->
+    <div id="appShell" class="shell is-hidden">
+      <aside class="sidebar">
+        <div class="side-brand">
+          <div class="side-logo">JA</div>
+          <div class="side-brand-text">
+            <strong>Job Agent</strong>
+            <span>Bewerbungs-Copilot</span>
           </div>
         </div>
-        <nav class="nav" aria-label="Hauptnavigation">
-          <button class="nav-link" data-route="profil" type="button">
-            <span class="nav-ico">①</span> Profil
+
+        <nav class="side-nav" aria-label="Hauptnavigation">
+          <button class="side-link is-active" data-route="profil" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12a4 4 0 100-8 4 4 0 000 8zm0 2c-4 0-7 2-7 5v1h14v-1c0-3-3-5-7-5z"/></svg>
+            <span>Profil</span>
           </button>
-          <button class="nav-link" data-route="pipeline" type="button">
-            <span class="nav-ico">②</span> Pipeline
+          <button class="side-link" data-route="suche" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 4a6 6 0 104.47 10.03l4.25 4.25 1.41-1.41-4.25-4.25A6 6 0 0010 4zm0 2a4 4 0 110 8 4 4 0 010-8z"/></svg>
+            <span>Suche</span>
+          </button>
+          <button class="side-link" data-route="inbox" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16a1 1 0 011 1v14a1 1 0 01-1 1H4a1 1 0 01-1-1V5a1 1 0 011-1zm1 2v8h4l1.5 3h3L15 14h4V6H5zm0 10v2h14v-2h-4.4l-1.5 3h-2.2l-1.5-3H5z"/></svg>
+            <span>Inbox</span>
+            <span id="inboxBadge" class="nav-badge is-hidden">0</span>
+          </button>
+          <button class="side-link" data-route="bewerbungen" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2h9l5 5v13a2 2 0 01-2 2H6a2 2 0 01-2-2V4a2 2 0 012-2zm8 1.5V8h4.5L14 3.5zM8 12h8v2H8v-2zm0 4h8v2H8v-2z"/></svg>
+            <span>Bewerbungen</span>
+          </button>
+          <button class="side-link" data-route="followups" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22a2.5 2.5 0 002.45-2h-4.9A2.5 2.5 0 0012 22zm7-6v-5c0-3.1-2.1-5.7-5-6.5V4a2 2 0 10-4 0v.5c-2.9.8-5 3.4-5 6.5v5l-2 2v1h18v-1l-2-2z"/></svg>
+            <span>Follow-ups</span>
+            <span id="followupsBadge" class="nav-badge is-hidden">0</span>
+          </button>
+          <button class="side-link" data-route="einstellungen" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 110-7 3.5 3.5 0 010 7zm7.4-2.6c.04-.3.06-.6.06-.9s-.02-.6-.06-.9l2.1-1.65a.5.5 0 00.12-.64l-2-3.46a.5.5 0 00-.6-.22l-2.5 1a7.6 7.6 0 00-1.55-.9l-.38-2.65A.5.5 0 0014.1 2h-4.2a.5.5 0 00-.5.42l-.37 2.66c-.56.23-1.08.53-1.56.9l-2.49-1a.5.5 0 00-.6.21l-2 3.47a.5.5 0 00.11.64L4.6 11c-.04.3-.06.6-.06.9s.02.6.06.9l-2.1 1.66a.5.5 0 00-.12.64l2 3.46c.13.22.39.31.6.22l2.5-1c.47.36 1 .67 1.55.9l.38 2.65c.04.24.25.42.5.42h4.2c.24 0 .45-.18.49-.42l.38-2.66a7.6 7.6 0 001.55-.9l2.5 1c.22.1.48 0 .6-.21l2-3.47a.5.5 0 00-.11-.64l-2.1-1.65z"/></svg>
+            <span>Einstellungen</span>
           </button>
         </nav>
-        <div class="topbar-right">
+
+        <div class="side-foot">
           <span id="providerBadge" class="provider-badge">LLM</span>
-          <span id="currentUserLabel" class="user-badge"></span>
-          <button id="logoutBtn" class="btn btn-ghost btn-sm" type="button">Logout</button>
+          <button id="themeToggle" class="btn btn-ghost btn-icon" type="button" title="Hell/Dunkel umschalten" aria-label="Theme umschalten">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 108.5 12A7 7 0 0112 3z"/></svg>
+          </button>
         </div>
-      </header>
+      </aside>
 
-      <div id="globalProgress" class="progress hidden" role="status" aria-live="polite">
-        <div class="progress-info">
-          <span id="progressLabel">Arbeite …</span>
-          <span id="progressPct"></span>
+      <div class="main-wrap">
+        <header class="topbar">
+          <div class="topbar-left">
+            <h1 id="viewTitle">Profil</h1>
+            <span id="statusText" class="status-text">Bereit</span>
+          </div>
+          <div class="topbar-right">
+            <span id="currentUserLabel" class="user-badge"></span>
+            <button id="logoutBtn" class="btn btn-ghost btn-sm" type="button">Logout</button>
+          </div>
+        </header>
+
+        <!-- Pipeline progress -->
+        <div id="globalProgress" class="progress is-hidden" role="status" aria-live="polite">
+          <div class="progress-head">
+            <span id="progressLabel">Arbeite …</span>
+            <span id="progressPct"></span>
+          </div>
+          <div class="progress-track"><div id="progressFill" class="progress-fill"></div></div>
+          <div id="agentProgress" class="agent-flow" aria-label="Pipeline Agenten">
+            <div class="agent-node" data-agent="scout"><span class="agent-num">1</span><div><strong>Suchen</strong><small>Wartet</small></div></div>
+            <div class="agent-node" data-agent="matcher"><span class="agent-num">2</span><div><strong>Bewerten</strong><small>Wartet</small></div></div>
+            <div class="agent-node" data-agent="writer"><span class="agent-num">3</span><div><strong>Anschreiben</strong><small>Wartet</small></div></div>
+            <div class="agent-node" data-agent="tracker"><span class="agent-num">4</span><div><strong>Speichern</strong><small>Wartet</small></div></div>
+          </div>
         </div>
-        <div class="progress-track"><div id="progressFill" class="progress-fill"></div></div>
-        <div id="agentProgress" class="agent-progress" aria-label="Pipeline Agenten">
-          <div class="agent-step" data-agent="scout">
-            <span class="agent-dot">1</span>
-            <div><strong>Scout</strong><small>Wartet</small></div>
-          </div>
-          <div class="agent-step" data-agent="matcher">
-            <span class="agent-dot">2</span>
-            <div><strong>Matcher</strong><small>Wartet</small></div>
-          </div>
-          <div class="agent-step" data-agent="writer">
-            <span class="agent-dot">3</span>
-            <div><strong>Writer</strong><small>Wartet</small></div>
-          </div>
-          <div class="agent-step" data-agent="tracker">
-            <span class="agent-dot">4</span>
-            <div><strong>Tracker</strong><small>Wartet</small></div>
-          </div>
-        </div>
-      </div>
 
-      <main class="main">
-        <!-- ============================== PROFIL ============================== -->
-        <section id="view-profil" class="view">
-          <div class="page-head">
-            <h1>Profil</h1>
-            <div id="profileStatus" class="profile-status demo">Aktives Profil: Demo-Profil</div>
-            <p>Lade deinen Lebenslauf hoch — das Profil wird extrahiert und hier zum Prüfen angezeigt.</p>
-          </div>
-
-          <div class="grid-2">
-            <div class="card">
-              <h2 class="card-title">Lebenslauf importieren</h2>
-              <div id="dropzone" class="dropzone" tabindex="0" role="button"
-                   aria-label="CV-Datei auswählen oder hierher ziehen">
-                <input id="cvFile" type="file" accept=".pdf,.docx,.txt,.md" hidden />
-                <div class="dz-icon">⬆</div>
-                <p class="dz-main"><strong>PDF hierher ziehen</strong> oder klicken</p>
-                <p class="dz-sub">PDF (auch gescannt – OCR), DOCX, TXT, MD</p>
-              </div>
-              <p id="cvFileStatus" class="hint"></p>
-
-              <details class="paste">
-                <summary>Stattdessen Text einfügen</summary>
-                <textarea id="cvInput" rows="6" placeholder="Lebenslauf-Text hier einfügen …"></textarea>
-              </details>
-
-              <button id="buildProfileBtn" class="btn btn-primary btn-wide" type="button">
-                Profil erstellen &amp; prüfen
-              </button>
-              <div class="profile-actions">
-                <button id="demoProfileBtn" class="btn btn-ghost" type="button">Demo-Profil laden</button>
-                <button id="goPipelineBtn" class="btn btn-ghost" type="button">Zur Pipeline</button>
-              </div>
-            </div>
-
-            <div class="card">
-              <h2 class="card-title">Extrahiertes Profil</h2>
-              <div id="profilePanel" class="profile-empty">
-                Noch kein Profil. Importiere links einen Lebenslauf und klicke
-                <em>„Profil erstellen &amp; prüfen"</em>.
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <!-- ============================== PIPELINE ============================== -->
-        <section id="view-pipeline" class="view hidden">
-          <div class="page-head">
-            <h1>Pipeline</h1>
-            <p>Scout → Matcher → Writer → Tracker. <span id="activeProfile" class="active-profile"></span></p>
-          </div>
-
-          <div class="card controls">
-            <div class="controls-row">
-              <label class="field">
-                <span>Suchbegriff</span>
-                <input id="queryInput" type="text" value="Werkstudent KI" />
-              </label>
-              <label class="field field-sm">
-                <span>Limit</span>
-                <input id="limitInput" type="number" min="1" max="25" value="5" />
-              </label>
-              <label class="field field-sm">
-                <span>Threshold</span>
-                <input id="thresholdInput" type="number" min="0" max="1" step="0.05" value="0.5" />
-              </label>
-              <div class="field">
-                <span>Modus</span>
-                <div class="segmented" role="group" aria-label="Scout-Modus">
-                  <button id="demoModeBtn" class="segment active" type="button">Demo</button>
-                  <button id="liveModeBtn" class="segment" type="button">Live</button>
+        <main class="content">
+          <!-- ===================== PROFIL ===================== -->
+          <section id="view-profil" class="view">
+            <div id="profileStatus" class="banner banner-demo">Kein Profil geladen.</div>
+            <div class="profil-top">
+              <div class="card import-card">
+                <div class="card-head"><h2>Lebenslauf importieren</h2></div>
+                <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-label="CV-Datei auswählen oder hierher ziehen">
+                  <input id="cvFile" type="file" accept=".pdf,.docx,.txt,.md" hidden />
+                  <div class="dz-badge"><svg class="dz-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l4 4h-3v6h-2V7H8l4-4zM5 18h14v2H5v-2z"/></svg></div>
+                  <p class="dz-main"><strong>PDF hierher ziehen</strong> oder klicken</p>
+                  <p class="dz-sub">PDF (auch gescannt – OCR), DOCX, TXT, MD</p>
+                </div>
+                <p id="cvFileStatus" class="hint"></p>
+                <details class="paste">
+                  <summary>Stattdessen Text einfügen</summary>
+                  <textarea id="cvInput" rows="6" placeholder="Lebenslauf-Text hier einfügen …"></textarea>
+                </details>
+                <button id="buildProfileBtn" class="btn btn-primary btn-block" type="button">Profil erstellen &amp; prüfen</button>
+                <div class="btn-duo">
+                  <button id="demoProfileBtn" class="btn btn-ghost" type="button">Demo-Profil laden</button>
+                  <button id="goPipelineBtn" class="btn btn-ghost" type="button">Zur Suche →</button>
                 </div>
               </div>
-              <button id="runBtn" class="btn btn-primary" type="button">
-                <span class="btn-ico">▶</span> Pipeline starten
-              </button>
+
+              <div class="card profile-card">
+                <div class="card-head"><h2>Extrahiertes Profil</h2></div>
+                <div id="profilePanel" class="profile-empty">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12a5 5 0 100-10 5 5 0 000 10zm0 2.5c-5 0-9 2.4-9 5.5V22h18v-2c0-3.1-4-5.5-9-5.5z"/></svg>
+                  <p class="pe-title">Noch kein Profil</p>
+                  <p class="muted-xs">Importiere links einen Lebenslauf und klicke „Profil erstellen &amp; prüfen" — oder lade das Demo-Profil.</p>
+                </div>
+              </div>
             </div>
 
-            <div class="controls-row toggles">
-              <label class="check"><input id="llmInput" type="checkbox" /><span>LLM-Agenten</span></label>
-              <label class="check"><input id="chromaInput" type="checkbox" /><span>Chroma</span></label>
-              <label class="check"><input id="draftAllInput" type="checkbox" /><span>Entwürfe für alle Jobs</span></label>
-              <label class="check"><input id="resetInput" type="checkbox" checked /><span>DB zurücksetzen</span></label>
-              <details class="advanced">
-                <summary>Erweitert</summary>
-                <label class="field">
-                  <span>DB-Pfad</span>
-                  <input id="dbPathInput" type="text" value="./data/demo_job_agent.db" />
-                </label>
-              </details>
-            </div>
-          </div>
-
-          <div class="metrics">
-            <div class="metric"><span>Jobs</span><strong id="jobsMetric">0</strong></div>
-            <div class="metric"><span>Matches</span><strong id="matchesMetric">0</strong></div>
-            <div class="metric"><span>Entwürfe</span><strong id="draftsMetric">0</strong></div>
-            <div class="metric"><span>Getrackt</span><strong id="trackedMetric">0</strong></div>
-          </div>
-
-          <div class="results-grid">
-            <div class="card table-card">
+            <div class="card" id="cvCheckCard">
               <div class="card-head">
-                <h2 class="card-title">Jobs</h2>
-                <span id="dbPathLabel" class="muted-sm"></span>
+                <h2>CV-Check — Lebenslauf bewerten</h2>
+                <label class="check" title="Zusätzlicher Feedback-Absatz vom konfigurierten LLM">
+                  <input id="cvCheckLlmInput" type="checkbox" /><span>LLM-Feedback</span>
+                </label>
+              </div>
+              <p class="hint">
+                Bewertet den Lebenslauf selbst (nicht den Job-Fit): Kontaktdaten, Struktur,
+                Skills, Konkretheit, Sprachen und Umfang — offline, deterministisch, erklärbar.
+              </p>
+              <div class="btn-row">
+                <button id="reviewCvBtn" class="btn btn-primary" type="button">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 21h6v-1H9v1zm3-19a7 7 0 00-4 12.7c.6.5 1 1.4 1 2.3h6c0-.9.4-1.8 1-2.3A7 7 0 0012 2z"/></svg>
+                  Lebenslauf bewerten
+                </button>
+              </div>
+              <div id="cvCheckPanel" class="cv-check is-hidden"></div>
+            </div>
+          </section>
+
+          <!-- ===================== SUCHE / PIPELINE ===================== -->
+          <section id="view-suche" class="view is-hidden search-workspace">
+            <section class="search-hero" aria-labelledby="searchHeading">
+              <div class="search-hero-copy">
+                <p class="section-eyebrow">Suche</p>
+                <h2 id="searchHeading">Bewerbungsradar</h2>
+                <p>Finde passende Stellen, entscheide nach klaren Kriterien und arbeite Bewerbungen sauber ab.</p>
+              </div>
+              <div class="search-hero-facts">
+                <div><span>Profil</span><strong id="searchProfileFact">Kein Profil</strong></div>
+                <div><span>Quelle</span><strong id="sourceFact">Beispiele</strong></div>
+                <div><span>Status</span><strong id="searchStateFact">Bereit</strong></div>
+              </div>
+            </section>
+
+            <div class="card controls search-panel">
+              <div class="controls-grid">
+                <label class="field field-grow">
+                  <span>Was suchst du?</span>
+                  <input id="queryInput" type="text" value="Werkstudent Software" placeholder="z. B. Werkstudent Software, Data Analyst, Praktikum Marketing" />
+                </label>
+                <label class="field field-xs">
+                  <span>Anzahl</span>
+                  <input id="limitInput" type="number" min="1" max="25" value="5" />
+                </label>
+                <label class="field field-range">
+                  <span>Mindest-Fit <output id="thresholdOut" class="range-out">50 %</output></span>
+                  <input id="thresholdInput" class="range" type="range" min="0" max="100" step="5" value="50" />
+                </label>
+                <div class="field">
+                  <span>Jobquelle</span>
+                  <div class="segmented" role="group" aria-label="Jobquelle">
+                    <button id="demoModeBtn" class="segment is-active" type="button">Beispiele</button>
+                    <button id="liveModeBtn" class="segment" type="button">Live</button>
+                  </div>
+                </div>
+                <button id="runBtn" class="btn btn-primary btn-run" type="button">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg> Jobs finden
+                </button>
+              </div>
+              <div class="controls-toggles">
+                <label class="switch"><input id="llmInput" type="checkbox" /><span>Semantische Bewertung <small>genauer, dauert länger</small></span></label>
+                <label class="switch"><input id="draftAllInput" type="checkbox" /><span>Entwurf für jeden Job</span></label>
+                <details class="advanced">
+                  <summary>Erweiterte Optionen</summary>
+                  <div class="advanced-body">
+                    <label class="check"><input id="resetInput" type="checkbox" /><span>Vorherige Ergebnisse loeschen</span></label>
+                    <label class="check"><input id="chromaInput" type="checkbox" /><span>Profil-Kontext einbeziehen</span></label>
+                    <input id="dbPathInput" type="hidden" value="./data/demo_job_agent.db" />
+                  </div>
+                </details>
+                <span id="activeProfile" class="active-profile"></span>
+              </div>
+            </div>
+
+            <div class="metrics search-metrics">
+              <div class="metric"><span>Gefunden</span><strong id="jobsMetric">0</strong></div>
+              <div class="metric"><span>Bewertet</span><strong id="matchesMetric">0</strong></div>
+              <div class="metric"><span>Entwürfe</span><strong id="draftsMetric">0</strong></div>
+              <div class="metric"><span>Getrackt</span><strong id="trackedMetric">0</strong></div>
+            </div>
+
+            <div class="results search-results">
+              <div class="card jobs-card search-column">
+                <div class="card-head">
+                  <h2>Jobs</h2>
+                  <span id="dbPathLabel" class="muted-xs">Bereit</span>
+                </div>
+                <div id="jobsBody" class="jobs-list">
+                  <div class="empty">Noch keine Jobs — starte die Pipeline.</div>
+                </div>
+              </div>
+
+              <div class="card detail-card search-column">
+                <div class="card-head">
+                  <h2 id="detailTitle">Details</h2>
+                  <div class="detail-actions">
+                    <span id="livenessBadge" class="liveness-badge is-hidden"></span>
+                    <button id="checkLivenessBtn" class="btn btn-ghost btn-sm" type="button" disabled>Verfügbarkeit</button>
+                    <a id="jobLink" class="btn btn-ghost btn-sm" href="#" target="_blank" rel="noreferrer">Quelle</a>
+                  </div>
+                </div>
+                <div id="jobDetail" class="detail-body empty-detail">Keine Auswahl</div>
+
+                <details class="detail-section letter-block" open>
+                  <summary>
+                    <span>Anschreiben</span>
+                    <small>Entwurf und Export</small>
+                  </summary>
+                  <div class="detail-section-body">
+                    <div class="letter-actions">
+                      <button id="generateDraftBtn" class="btn btn-primary btn-sm" type="button">Entwurf erstellen</button>
+                      <button id="copyBtn" class="btn btn-ghost btn-sm" type="button">Kopieren</button>
+                      <button id="exportBtn" class="btn btn-ghost btn-sm" type="button">Export (PDF)</button>
+                      <button id="reportBtn" class="btn btn-ghost btn-sm" type="button">Report (MD)</button>
+                      <button id="interviewPrepBtn" class="btn btn-ghost btn-sm" type="button">Interview-Vorbereitung</button>
+                      <a id="downloadLink" class="btn btn-ghost btn-sm is-hidden" download>Paket laden</a>
+                    </div>
+                  <pre id="letterBody" class="letter">Noch kein Entwurf.</pre>
+
+                  <div class="track-row">
+                    <select id="statusSelect" aria-label="Bewerbungsstatus">
+                      <option value="draft">Entwurf</option>
+                      <option value="submitted">Eingereicht</option>
+                      <option value="interview">Interview</option>
+                      <option value="offer">Angebot</option>
+                      <option value="rejected">Absage</option>
+                      <option value="withdrawn">Zurückgezogen</option>
+                    </select>
+                    <input id="notesInput" type="text" placeholder="Notiz" />
+                    <button id="saveStatusBtn" class="btn btn-ghost btn-sm" type="button">Status speichern</button>
+                  </div>
+                  <div class="track-row">
+                    <input id="emailRecipientInput" type="email" list="recipientSuggestionsList" placeholder="E-Mail aus der Anzeige oder manuell eintragen" />
+                    <datalist id="recipientSuggestionsList"></datalist>
+                    <label class="check" title="Lebenslauf als PDF anhängen"><input id="attachCvInput" type="checkbox" checked /><span>CV anhängen</span></label>
+                    <button id="sendEmailBtn" class="btn btn-primary btn-sm" type="button">E-Mail senden</button>
+                    <button id="syncInboxBtn" class="btn btn-ghost btn-sm" type="button">Inbox prüfen</button>
+                  </div>
+                  <div id="recipientHint" class="recipient-hint"></div>
+                  <div id="interviewPrepPanel" class="prep-panel is-hidden"></div>
+                  </div>
+                </details>
+              </div>
+            </div>
+          </section>
+
+          <!-- ===================== URL-INBOX ===================== -->
+          <section id="view-inbox" class="view is-hidden">
+            <div class="card">
+              <div class="card-head">
+                <h2>URL-Inbox</h2>
+                <span class="muted-xs">Links jederzeit merken — später gesammelt bewerten</span>
+              </div>
+              <div class="inbox-add-row">
+                <input id="inboxUrlInput" type="url" placeholder="https://… Stellen-Link einfügen" />
+                <input id="inboxNoteInput" type="text" placeholder="Notiz (optional)" />
+                <button id="addInboxBtn" class="btn btn-primary" type="button">Merken</button>
+              </div>
+              <div id="inboxBody" class="inbox-list">
+                <div class="empty">Die Inbox ist leer — Link oben einfügen oder eine Anzeige unten direkt bewerten.</div>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-head">
+                <h2>Anzeige einfügen &amp; sofort bewerten</h2>
+                <label class="check" title="Semantische Bewertung mit dem konfigurierten LLM">
+                  <input id="jdLlmInput" type="checkbox" /><span>LLM verwenden</span>
+                </label>
+              </div>
+              <p class="hint">
+                Kompletten Anzeigentext einfügen — der Agent baut daraus eine Stelle, bewertet sie
+                mit der Rubrik und entwirft bei ausreichendem Score direkt ein Anschreiben.
+              </p>
+              <div class="jd-form-grid">
+                <label class="field"><span>Jobtitel *</span><input id="jdTitleInput" type="text" placeholder="z. B. Werkstudent KI" /></label>
+                <label class="field"><span>Unternehmen</span><input id="jdCompanyInput" type="text" placeholder="z. B. RuhrTech GmbH" /></label>
+                <label class="field"><span>Standort</span><input id="jdLocationInput" type="text" placeholder="z. B. Gelsenkirchen" /></label>
+                <label class="field"><span>URL (optional)</span><input id="jdUrlInput" type="url" placeholder="https://…" /></label>
+              </div>
+              <textarea id="jdTextInput" rows="8" placeholder="Kompletten Anzeigentext hier einfügen …"></textarea>
+              <div class="btn-row">
+                <button id="evaluateJdBtn" class="btn btn-primary" type="button">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+                  Bewerten
+                </button>
+                <span class="muted-xs">Ergebnis erscheint hier und zusätzlich unter „Suche".</span>
+              </div>
+              <div id="jdEvalResult" class="jd-eval-result is-hidden"></div>
+            </div>
+          </section>
+
+          <!-- ===================== BEWERBUNGEN / TRACKER ===================== -->
+          <section id="view-bewerbungen" class="view is-hidden">
+            <div class="card">
+              <div class="card-head">
+                <h2>Muster &amp; Statistik</h2>
+                <button id="refreshPatternsBtn" class="btn btn-ghost btn-sm" type="button">Aktualisieren</button>
+              </div>
+              <div id="patternsPanel" class="patterns-panel">
+                <div class="empty">Noch keine Auswertung — erscheint, sobald Bewerbungen getrackt sind.</div>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-head">
+                <h2>Bewerbungen &amp; Tracker</h2>
+                <span class="muted-xs">Alle Entwürfe und ihr Status</span>
               </div>
               <div class="table-wrap">
-                <table>
+                <table class="tracker-table">
                   <thead>
-                    <tr><th>Rolle</th><th>Unternehmen</th><th>Quelle</th><th>Score</th><th>Status</th></tr>
+                    <tr><th>Job</th><th>Status</th><th>Eingereicht</th><th>Aktualisiert</th><th>Notiz</th><th></th></tr>
                   </thead>
-                  <tbody id="jobsBody">
-                    <tr><td colspan="5" class="empty">Noch keine Jobs — starte die Pipeline.</td></tr>
+                  <tbody id="trackerBody">
+                    <tr><td colspan="6" class="empty">Noch keine Bewerbungen — starte die Pipeline in „Suche".</td></tr>
                   </tbody>
                 </table>
               </div>
             </div>
+          </section>
 
-            <div class="card detail-card">
+          <!-- ===================== FOLLOW-UPS ===================== -->
+          <section id="view-followups" class="view is-hidden">
+            <div class="card">
               <div class="card-head">
-                <h2 class="card-title" id="detailTitle">Details</h2>
-                <a id="jobLink" href="#" target="_blank" rel="noreferrer">Quelle ↗</a>
+                <h2>Follow-up-Radar</h2>
+                <div class="fu-controls">
+                  <span id="autopilotStatusChip" class="chip status" title="Autopilot-Status — konfigurierbar unter Einstellungen">Autopilot: aus</span>
+                  <label class="field field-xs">
+                    <span>Fällig nach (Tagen)</span>
+                    <input id="followupDaysInput" type="number" min="1" max="60" value="7" />
+                  </label>
+                  <button id="refreshFollowupsBtn" class="btn btn-ghost btn-sm" type="button">Aktualisieren</button>
+                  <button id="syncInboxFollowupsBtn" class="btn btn-ghost btn-sm" type="button">Inbox synchronisieren</button>
+                  <button id="runEmailAutopilotBtn" class="btn btn-primary btn-sm" type="button">Autopilot jetzt ausführen</button>
+                </div>
               </div>
-              <div id="jobDetail" class="detail-body empty-detail">Keine Auswahl</div>
+              <p class="hint">
+                Eingereichte Bewerbungen ohne Aktivität — mit fertigem, höflichem
+                Nachfass-Entwurf. Der Autopilot bereitet standardmäßig nur vor
+                (Zwei-Schritt-Prinzip); echter Versand nur mit ausdrücklichem Opt-in
+                in den Einstellungen.
+              </p>
+              <div id="followupsBody" class="fu-list">
+                <div class="empty">Keine fälligen Follow-ups — alles im grünen Bereich.</div>
+              </div>
             </div>
-          </div>
+          </section>
 
-          <div class="card letters-card">
-            <div class="card-head">
-              <h2 class="card-title">Anschreiben</h2>
-              <div class="letter-actions">
-                <select id="statusSelect" aria-label="Bewerbungsstatus">
-                  <option value="draft">Entwurf</option>
-                  <option value="submitted">Eingereicht</option>
-                  <option value="interview">Interview</option>
-                  <option value="offer">Angebot</option>
-                  <option value="rejected">Absage</option>
-                  <option value="withdrawn">Zurückgezogen</option>
-                </select>
-                <input id="notesInput" type="text" placeholder="Notiz" />
-                <input id="emailRecipientInput" type="email" placeholder="E-Mail Empfänger" />
-                <button id="sendEmailBtn" class="btn btn-primary" type="button">E-Mail senden</button>
-                <button id="syncInboxBtn" class="btn btn-ghost" type="button">Inbox prüfen</button>
-                <button id="saveStatusBtn" class="btn btn-ghost" type="button">Status speichern</button>
-                <button id="copyBtn" class="btn btn-ghost" type="button">Kopieren</button>
+          <!-- ===================== EINSTELLUNGEN ===================== -->
+          <section id="view-einstellungen" class="view is-hidden">
+            <div class="card email-card">
+              <div class="card-head">
+                <h2>E-Mail-Verbindung</h2>
+                <span id="emailConnectionBadge" class="email-badge muted">Nicht verbunden</span>
+              </div>
+              <div id="emailIdentityPanel" class="email-identity">
+                <div class="empty">Noch keine E-Mail-Identität geladen.</div>
+              </div>
+              <details class="email-setup">
+                <summary>Lokale SMTP/IMAP-Zugangsdaten</summary>
+                <div class="email-form-grid">
+                  <label class="field"><span>Profil-/Konto-E-Mail</span><input id="emailAddressInput" type="email" placeholder="name@example.com" /></label>
+                  <label class="field"><span>Absender</span><input id="emailFromInput" type="email" placeholder="name@example.com" /></label>
+                  <label class="field"><span>SMTP Host</span><input id="smtpHostInput" type="text" placeholder="smtp.example.com" /></label>
+                  <label class="field field-xs"><span>SMTP Port</span><input id="smtpPortInput" type="number" min="1" max="65535" value="587" /></label>
+                  <label class="field"><span>SMTP User</span><input id="smtpUserInput" type="email" placeholder="name@example.com" /></label>
+                  <label class="field"><span>SMTP App-Passwort</span><input id="smtpPasswordInput" type="password" autocomplete="new-password" placeholder="leer lassen = behalten" /></label>
+                  <label class="field"><span>IMAP Host</span><input id="imapHostInput" type="text" placeholder="imap.example.com" /></label>
+                  <label class="field field-xs"><span>IMAP Port</span><input id="imapPortInput" type="number" min="1" max="65535" value="993" /></label>
+                  <label class="field"><span>IMAP User</span><input id="imapUserInput" type="email" placeholder="name@example.com" /></label>
+                  <label class="field"><span>IMAP App-Passwort</span><input id="imapPasswordInput" type="password" autocomplete="new-password" placeholder="leer lassen = behalten" /></label>
+                  <label class="field field-xs"><span>Ordner</span><input id="imapFolderInput" type="text" value="INBOX" /></label>
+                  <label class="check email-tls"><input id="emailUseTlsInput" type="checkbox" checked /><span>TLS für SMTP</span></label>
+                </div>
+                <div class="btn-row">
+                  <button id="fillEmailFromProfileBtn" class="btn btn-ghost btn-sm" type="button">Profil-Mail übernehmen</button>
+                  <button id="saveEmailCredentialsBtn" class="btn btn-primary btn-sm" type="button">Verbindung speichern</button>
+                  <button id="testEmailConnectionBtn" class="btn btn-ghost btn-sm" type="button">Verbindung testen</button>
+                  <button id="clearEmailCredentialsBtn" class="btn btn-ghost btn-sm" type="button">Lokale Daten entfernen</button>
+                </div>
+                <div id="emailConnectionTestPanel" class="email-test is-hidden"></div>
+              </details>
+              <div class="oauth-panel">
+                <div class="oauth-panel-head">
+                  <strong>OAuth</strong>
+                  <span>Gmail oder Outlook ohne App-Passwort verbinden</span>
+                </div>
+                <div class="btn-row">
+                  <button id="connectGoogleBtn" class="btn btn-ghost btn-sm" type="button">Gmail verbinden</button>
+                  <button id="connectMicrosoftBtn" class="btn btn-ghost btn-sm" type="button">Outlook verbinden</button>
+                </div>
               </div>
             </div>
-            <pre id="letterBody">Noch kein Entwurf.</pre>
-          </div>
-        </section>
-      </main>
+
+            <div class="card">
+              <div class="card-head">
+                <h2>Autopilot-Plan</h2>
+                <span class="muted-xs">Inbox-Sync + Follow-up-Vorbereitung im Intervall</span>
+              </div>
+              <p class="hint">
+                Der Autopilot arbeitet nach dem Zwei-Schritt-Prinzip: Er synchronisiert die Inbox
+                und <strong>bereitet</strong> fällige Nachfass-Mails vor. Echter Versand passiert nur,
+                wenn EMAIL_AUTO_FOLLOW_UP_SEND und EMAIL_DRY_RUN=false ausdrücklich gesetzt sind.
+                Der Plan lebt im Serverprozess (endet mit Neustart) — eine bewusste Grenze.
+              </p>
+              <div class="fu-controls">
+                <label class="field field-xs">
+                  <span>Intervall (Minuten)</span>
+                  <input id="autopilotIntervalInput" type="number" min="5" max="1440" value="15" />
+                </label>
+                <button id="startAutopilotScheduleBtn" class="btn btn-primary btn-sm" type="button">Plan starten</button>
+                <button id="stopAutopilotScheduleBtn" class="btn btn-ghost btn-sm" type="button">Plan stoppen</button>
+              </div>
+              <div id="autopilotSchedulePanel" class="email-audit is-hidden"></div>
+              <div id="emailAuditPanel" class="email-audit is-hidden"></div>
+            </div>
+          </section>
+        </main>
+      </div>
     </div>
+
     <script src="/static/app.js"></script>
   </body>
 </html>

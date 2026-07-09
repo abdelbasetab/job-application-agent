@@ -91,4 +91,7 @@ def offline_defaults(
     monkeypatch.setattr("job_agent.agents.scout.run_scout", fake_run_scout)
     monkeypatch.setattr("job_agent.utils.config.settings.enable_llm_agents", False)
     monkeypatch.setattr("job_agent.utils.config.settings.enable_chroma", False)
+    # Tier-2 skill matching would otherwise call the real /embeddings endpoint
+    # when the developer's .env configures one — force the offline fuzzy tier.
+    monkeypatch.setattr("job_agent.utils.config.settings.embedding_model", "")
     yield

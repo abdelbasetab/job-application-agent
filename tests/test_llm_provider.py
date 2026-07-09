@@ -56,3 +56,126 @@ def test_call_llm_requires_base_url_for_kiconnect(monkeypatch):
     monkeypatch.setattr(llm.settings, "llm_base_url", None)
     with pytest.raises(RuntimeError):
         llm.call_llm([{"role": "user", "content": "hi"}])
+
+
+class _Resp:
+    """Minimal fake httpx response with a controllable status code."""
+
+    def __init__(self, status_code: int = 200, content: str = "ok", usage: dict | None = None):
+        self.status_code = status_code
+        self._content = content
+        self._usage = usage or {}
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+    def json(self) -> dict:
+        return {
+            "choices": [{"message": {"content": self._content}}],
+            "usage": self._usage,
+        }
+
+
+@pytest.fixture
+def ollama_env(monkeypatch):
+    monkeypatch.setattr(llm.settings, "llm_provider", "ollama")
+    monkeypatch.setattr(llm.settings, "llm_base_url", "http://localhost:11434")
+    monkeypatch.setattr(llm.settings, "llm_model", "test-model")
+    monkeypatch.setattr(llm, "_sleep", lambda _s: None)  # retries must not wait in tests
+    llm.telemetry.reset()
+
+
+def test_call_llm_retries_transient_errors_then_succeeds(monkeypatch, ollama_env):
+    calls = {"n": 0}
+
+    def fake_post(url, **kwargs):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            return _Resp(429)
+        return _Resp(200, "done", usage={"prompt_tokens": 7, "completion_tokens": 3})
+
+    monkeypatch.setattr(llm.httpx, "post", fake_post)
+
+    assert llm.call_llm([{"role": "user", "content": "hi"}]) == "done"
+    assert calls["n"] == 3
+
+    [record] = llm.telemetry.snapshot()
+    assert record.ok
+    assert record.retries == 2
+    assert record.prompt_tokens == 7
+    assert record.completion_tokens == 3
+
+
+def test_call_llm_gives_up_after_max_attempts(monkeypatch, ollama_env):
+    monkeypatch.setattr(llm.httpx, "post", lambda url, **kw: _Resp(503))
+
+    with pytest.raises(RuntimeError, match="failed after"):
+        llm.call_llm([{"role": "user", "content": "hi"}])
+
+    [record] = llm.telemetry.snapshot()
+    assert not record.ok
+    assert "503" in record.error
+
+
+def test_structured_output_sends_json_schema(monkeypatch, ollama_env):
+    from pydantic import BaseModel
+
+    class Out(BaseModel):
+        x: int = 0
+
+    payloads: list[dict] = []
+
+    def fake_post(url, **kwargs):
+        payloads.append(kwargs["json"])
+        return _Resp(200, '{"x": 1}')
+
+    monkeypatch.setattr(llm.httpx, "post", fake_post)
+
+    out = llm.call_llm([{"role": "user", "content": "hi"}], schema=Out, schema_name="Out")
+
+    assert out == '{"x": 1}'
+    response_format = payloads[0]["response_format"]
+    assert response_format["type"] == "json_schema"
+    assert response_format["json_schema"]["name"] == "Out"
+    assert response_format["json_schema"]["schema"]["properties"]["x"]["type"] == "integer"
+
+
+def test_structured_output_falls_back_when_gateway_rejects_schema(monkeypatch, ollama_env):
+    from pydantic import BaseModel
+
+    class Out(BaseModel):
+        x: int = 0
+
+    payloads: list[dict] = []
+
+    def fake_post(url, **kwargs):
+        payloads.append(dict(kwargs["json"]))  # copy — the client mutates its payload
+        if "response_format" in kwargs["json"]:
+            return _Resp(400)  # gateway without structured-output support
+        return _Resp(200, '{"x": 2}')
+
+    monkeypatch.setattr(llm.httpx, "post", fake_post)
+
+    out = llm.call_llm([{"role": "user", "content": "hi"}], schema=Out)
+
+    assert out == '{"x": 2}'
+    assert "response_format" in payloads[0]
+    assert "response_format" not in payloads[1]
+
+
+def test_telemetry_summary_aggregates(monkeypatch, ollama_env):
+    monkeypatch.setattr(
+        llm.httpx,
+        "post",
+        lambda url, **kw: _Resp(200, "ok", usage={"prompt_tokens": 10, "completion_tokens": 5}),
+    )
+
+    llm.call_llm([{"role": "user", "content": "a"}])
+    llm.call_llm([{"role": "user", "content": "b"}])
+
+    summary = llm.telemetry.summary()
+    assert summary["calls"] == 2
+    assert summary["failed"] == 0
+    assert summary["prompt_tokens"] == 20
+    assert summary["completion_tokens"] == 10
