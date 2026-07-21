@@ -1,7 +1,7 @@
 """Job-board adapters for Scout.
 
-Sprint 2: real HTTP implementations against Adzuna and the Bundesagentur für
-Arbeit Jobsuche-API. Each function returns validated `JobPosting` instances.
+HTTP implementations for Adzuna and the Bundesagentur für Arbeit Jobsuche-API.
+Each function returns validated :class:`JobPosting` instances.
 
 Errors are caught and logged, never raised: a failing adapter returns []. The
 caller (Scout) decides what to do when *all* sources fail.
@@ -14,6 +14,7 @@ import hashlib
 import re
 from datetime import date
 from typing import Any, Literal
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
 
@@ -25,6 +26,7 @@ log = get_logger(__name__)
 
 _USER_AGENT = "JobApplicationAgent/1.0"
 _HTTP_TIMEOUT = 15.0
+_MAX_DESCRIPTION_CHARS = 200_000
 _SALARY_RANGE_RE = re.compile(
     r"(?P<low>\d{2,3}(?:[.\s]\d{3})|\d{5,6})\s*"
     r"(?:-|\u2013|\u2014|bis|to)\s*"
@@ -84,11 +86,18 @@ def _stable_id(source: str, source_id: str) -> str:
     return digest[:16]
 
 
-def _parse_iso_date(value: str | None) -> date | None:
-    if not value:
+def _clean_string(value: object, maximum: int) -> str:
+    if not isinstance(value, str):
+        return ""
+    return value.strip()[:maximum]
+
+
+def _parse_iso_date(value: object) -> date | None:
+    cleaned = _clean_string(value, 40)
+    if not cleaned:
         return None
     try:
-        return date.fromisoformat(value[:10])
+        return date.fromisoformat(cleaned[:10])
     except ValueError:
         return None
 
@@ -130,10 +139,11 @@ def extract_skill_mentions(text: str) -> tuple[list[str], list[str]]:
             match = re.search(pattern, lowered)
             if match is None:
                 continue
-            requirements.append(canonical)
             window = _sentence_window(lowered, match.start(), match.end())
             if any(cue in window for cue in _NICE_TO_HAVE_CUES):
                 nice_to_have.append(canonical)
+            else:
+                requirements.append(canonical)
             break
 
     return _dedup(requirements), _dedup(nice_to_have)
@@ -179,6 +189,53 @@ def _hydrate_requirements(posting: JobPosting) -> JobPosting:
     return posting
 
 
+def _response_object(response: httpx.Response, source: str) -> dict[str, Any] | None:
+    """Decode a board response without letting malformed JSON escape the adapter."""
+    try:
+        payload = response.json()
+    except (TypeError, ValueError) as exc:
+        log.error("[%s] invalid JSON response: %s", source, exc)
+        return None
+    if not isinstance(payload, dict):
+        log.error("[%s] expected a JSON object, got %s", source, type(payload).__name__)
+        return None
+    return payload
+
+
+def _canonical_url(value: object) -> str:
+    """Normalize a posting URL while discarding common tracking parameters."""
+    try:
+        parsed = urlsplit(str(value))
+    except ValueError:
+        return ""
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        return ""
+    host = parsed.hostname.lower().removeprefix("www.")
+    port = parsed.port
+    if port and not (
+        (parsed.scheme.lower() == "https" and port == 443)
+        or (parsed.scheme.lower() == "http" and port == 80)
+    ):
+        host = f"{host}:{port}"
+    path = re.sub(r"/+", "/", parsed.path).rstrip("/") or "/"
+    query = urlencode(
+        sorted(
+            (key, value)
+            for key, value in parse_qsl(parsed.query, keep_blank_values=False)
+            if not key.lower().startswith("utm_")
+            and key.lower() not in {"ref", "source", "tracking", "trk", "cid"}
+        )
+    )
+    return urlunsplit((parsed.scheme.lower(), host, path, query, ""))
+
+
+def _identity_key(posting: JobPosting) -> tuple[str, str, str]:
+    def fold(value: str) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
+
+    return fold(posting.title), fold(posting.company), fold(posting.location)
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # Adzuna
 # ────────────────────────────────────────────────────────────────────────────
@@ -192,11 +249,19 @@ def _adzuna_normalize(item: dict[str, Any]) -> JobPosting | None:
     """Map one Adzuna result dict into a validated JobPosting (or None)."""
     source: Literal["adzuna"] = "adzuna"
     source_id = str(item.get("id") or "").strip()
-    url = (item.get("redirect_url") or "").strip()
-    title = (item.get("title") or "").strip()
-    company = ((item.get("company") or {}).get("display_name") or "").strip()
-    location = ((item.get("location") or {}).get("display_name") or "").strip()
-    description = (item.get("description") or "").strip()
+    url = _clean_string(item.get("redirect_url"), 2_083)
+    title = _clean_string(item.get("title"), 500)
+    company_data = item.get("company")
+    location_data = item.get("location")
+    company = _clean_string(
+        company_data.get("display_name") if isinstance(company_data, dict) else None,
+        500,
+    )
+    location = _clean_string(
+        location_data.get("display_name") if isinstance(location_data, dict) else None,
+        500,
+    )
+    description = _clean_string(item.get("description"), _MAX_DESCRIPTION_CHARS)
 
     if not (source_id and url.startswith("https://") and title and company):
         return None
@@ -205,12 +270,14 @@ def _adzuna_normalize(item: dict[str, Any]) -> JobPosting | None:
     salary_max = item.get("salary_max")
     salary: tuple[int, int] | None = None
     if isinstance(salary_min, (int, float)) and isinstance(salary_max, (int, float)):
-        salary = (int(salary_min), int(salary_max))
+        low, high = sorted((int(salary_min), int(salary_max)))
+        if low >= 0:
+            salary = (low, high)
     if salary is None:
         salary = parse_salary_range(description)
 
     employment_type = _ADZUNA_CONTRACT_TIME.get(
-        (item.get("contract_time") or "").lower()
+        _clean_string(item.get("contract_time"), 100).lower()
     )
 
     try:
@@ -252,7 +319,14 @@ def adzuna_search(
         log.warning("[adzuna] missing credentials in .env — returning []")
         return []
 
-    url = f"https://api.adzuna.com/v1/api/jobs/{settings.adzuna_country}/search/{max(page, 1)}"
+    query = query.strip()[:200]
+    location = location.strip()[:120]
+    limit = max(1, min(50, int(limit)))
+    page = max(1, min(50, int(page)))
+    if not query:
+        return []
+
+    url = f"https://api.adzuna.com/v1/api/jobs/{settings.adzuna_country}/search/{page}"
     params: dict[str, str | int] = {
         "app_id": settings.adzuna_app_id,
         "app_key": settings.adzuna_app_key,
@@ -270,8 +344,18 @@ def adzuna_search(
         log.error("[adzuna] HTTP error: %s", exc)
         return []
 
-    raw_results = response.json().get("results", [])
-    postings = [p for item in raw_results if (p := _adzuna_normalize(item)) is not None]
+    payload = _response_object(response, "adzuna")
+    if payload is None:
+        return []
+    raw_results = payload.get("results", [])
+    if not isinstance(raw_results, list):
+        log.error("[adzuna] 'results' is not an array")
+        return []
+    postings = [
+        p
+        for item in raw_results[: max(50, limit * 2)]
+        if isinstance(item, dict) and (p := _adzuna_normalize(item)) is not None
+    ]
     log.info(
         "[adzuna] %d raw → %d validated postings", len(raw_results), len(postings)
     )
@@ -288,17 +372,17 @@ def _ba_normalize(item: dict[str, Any]) -> JobPosting | None:
     if not source_id:
         return None
 
-    title = (item.get("titel") or item.get("beruf") or "").strip()
-    company = (item.get("arbeitgeber") or "").strip()
+    title = _clean_string(item.get("titel") or item.get("beruf"), 500)
+    company = _clean_string(item.get("arbeitgeber"), 500)
 
     arbeitsort = item.get("arbeitsort") or {}
     if isinstance(arbeitsort, list) and arbeitsort:
         arbeitsort = arbeitsort[0]
     location = ""
     if isinstance(arbeitsort, dict):
-        location = (arbeitsort.get("ort") or "").strip()
+        location = _clean_string(arbeitsort.get("ort"), 500)
 
-    url = (item.get("externeUrl") or "").strip()
+    url = _clean_string(item.get("externeUrl"), 2_083)
     if not url.startswith("https://"):
         url = f"https://www.arbeitsagentur.de/jobsuche/jobdetail/{source_id}"
 
@@ -340,6 +424,11 @@ def ba_jobsuche_search(
     No API key required, but a descriptive User-Agent header is mandatory.
     Returns validated JobPosting items; logs and returns [] on HTTP errors.
     """
+    query = query.strip()[:200]
+    location = location.strip()[:120]
+    limit = max(1, min(50, int(limit)))
+    if not query:
+        return []
     url = f"{settings.ba_jobsuche_base_url}/jobs"
     params: dict[str, str | int] = {"was": query, "size": limit}
     if location:
@@ -361,8 +450,18 @@ def ba_jobsuche_search(
         log.error("[ba-jobsuche] HTTP error: %s", exc)
         return []
 
-    raw_results = response.json().get("stellenangebote", [])
-    postings = [p for item in raw_results if (p := _ba_normalize(item)) is not None]
+    payload = _response_object(response, "ba-jobsuche")
+    if payload is None:
+        return []
+    raw_results = payload.get("stellenangebote", [])
+    if not isinstance(raw_results, list):
+        log.error("[ba-jobsuche] 'stellenangebote' is not an array")
+        return []
+    postings = [
+        p
+        for item in raw_results[: max(50, limit * 2)]
+        if isinstance(item, dict) and (p := _ba_normalize(item)) is not None
+    ]
     log.info(
         "[ba-jobsuche] %d raw → %d validated postings",
         len(raw_results),
@@ -398,8 +497,12 @@ def ba_jobsuche_detail(refnr: str) -> str:
     except httpx.HTTPError as exc:
         log.warning("[ba-jobsuche] detail HTTP error for %s: %s", refnr, exc)
         return ""
-    data = response.json()
-    return str(data.get("stellenangebotsBeschreibung") or "").strip()
+    data = _response_object(response, "ba-jobsuche-detail")
+    if data is None:
+        return ""
+    return _clean_string(
+        data.get("stellenangebotsBeschreibung"), _MAX_DESCRIPTION_CHARS
+    )
 
 
 def _enrich_descriptions(postings: list[JobPosting]) -> list[JobPosting]:
@@ -430,33 +533,47 @@ def search_all(
     adzuna_pages: int = 1,
     enrich: bool = False,
 ) -> list[JobPosting]:
-    """Query both boards directly, merge and dedup by ``JobPosting.id``.
+    """Query both boards and deduplicate IDs, canonical URLs and cross-source jobs.
 
     Needs no LLM/tool-calling, so it works against any provider. Scout uses it
-    as a fallback when the CrewAI agent fails; the CLI exposes it via ``--direct``.
+    as the Scout's deterministic multi-source orchestration path.
 
     ``extra_queries`` broadens the search (e.g. profile skills); ``adzuna_pages``
     pages through Adzuna; ``enrich`` backfills missing descriptions (BA detail
     API + optional scraper) so the matcher has real text to work with.
     """
     queries: list[str] = []
-    for candidate in [query, *(extra_queries or [])]:
+    for candidate in [query, *(extra_queries or [])][:6]:
         cleaned = (candidate or "").strip()
         if cleaned and cleaned not in queries:
             queries.append(cleaned)
 
     combined: list[JobPosting] = []
     for q in queries:
-        for page in range(1, max(adzuna_pages, 1) + 1):
+        for page in range(1, max(1, min(int(adzuna_pages), 5)) + 1):
             combined += adzuna_search(query=q, location=location, limit=limit, page=page)
         combined += ba_jobsuche_search(query=q, location="", limit=limit)
 
-    seen: set[str] = set()
+    seen_ids: set[str] = set()
+    seen_urls: set[str] = set()
+    identity_sources: dict[tuple[str, str, str], str] = {}
     merged: list[JobPosting] = []
     for posting in combined:
-        if posting.id in seen:
+        canonical_url = _canonical_url(posting.url)
+        identity = _identity_key(posting)
+        previous_source = identity_sources.get(identity)
+        if posting.id in seen_ids or (canonical_url and canonical_url in seen_urls):
             continue
-        seen.add(posting.id)
+        # Two different boards frequently advertise the same role under different
+        # URLs and IDs. Exact normalized title/company/location is conservative
+        # enough to collapse that case while retaining same-board vacancies.
+        if all(identity) and previous_source is not None and previous_source != posting.source:
+            continue
+        seen_ids.add(posting.id)
+        if canonical_url:
+            seen_urls.add(canonical_url)
+        if all(identity):
+            identity_sources.setdefault(identity, posting.source)
         merged.append(posting)
     merged = merged[:limit]
     log.info(

@@ -8,9 +8,8 @@ Most providers we support speak the OpenAI Chat-Completions protocol:
                    "KI-Connect"); set ``LLM_BASE_URL`` + ``OPENAI_API_KEY``
 - **groq**       — OpenAI-compatible cloud
 
-For all of those we issue a plain ``httpx`` POST so the helper has no hard
-dependency on litellm/CrewAI. ``anthropic`` is the one non-OpenAI shape; it is
-routed through the existing CrewAI ``LLM`` adapter.
+All providers use small, bounded ``httpx`` clients here, so the runtime does
+not inherit an agent framework's transitive dependency and attack surface.
 
 Beyond the plain call, this module adds three production concerns:
 
@@ -29,11 +28,13 @@ Beyond the plain call, this module adds three production concerns:
 
 from __future__ import annotations
 
+import json
 import random
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from pydantic import BaseModel
@@ -51,6 +52,7 @@ _DEFAULT_BASE_URLS = {
     "ollama": "http://localhost:11434",
     "openai": "https://api.openai.com/v1",
     "groq": "https://api.groq.com/openai/v1",
+    "anthropic": "https://api.anthropic.com/v1",
     # kiconnect has no public default — it MUST be configured via LLM_BASE_URL.
 }
 
@@ -60,6 +62,8 @@ _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 _SCHEMA_REJECTED_STATUS = {400, 404, 415, 422}
 _MAX_ATTEMPTS = 3
 _BACKOFF_BASE_S = 0.5
+_MAX_PROMPT_CHARS = 200_000
+_MAX_COMPLETION_CHARS = 1_000_000
 
 # Injectable sleep so tests can run retries without waiting.
 _sleep = time.sleep
@@ -136,6 +140,16 @@ def chat_completions_url(base_url: str) -> str:
     return f"{base}/v1/chat/completions"
 
 
+def anthropic_messages_url(base_url: str) -> str:
+    """Normalize an Anthropic base URL into the Messages API endpoint."""
+    base = base_url.rstrip("/")
+    if base.endswith("/messages"):
+        return base
+    if base.endswith("/v1") or "/v1/" in base:
+        return f"{base}/messages"
+    return f"{base}/v1/messages"
+
+
 def _response_format(schema: type[BaseModel], schema_name: str) -> dict[str, Any]:
     """Build an OpenAI ``response_format`` block from a Pydantic model."""
     return {
@@ -156,9 +170,97 @@ def _extract_usage(data: dict[str, Any]) -> tuple[int, int]:
     usage = data.get("usage") or {}
     if not isinstance(usage, dict):
         return 0, 0
-    prompt = usage.get("prompt_tokens", 0)
-    completion = usage.get("completion_tokens", 0)
-    return int(prompt or 0), int(completion or 0)
+    try:
+        prompt = max(0, min(1_000_000_000, int(usage.get("prompt_tokens", 0) or 0)))
+        completion = max(
+            0, min(1_000_000_000, int(usage.get("completion_tokens", 0) or 0))
+        )
+    except (TypeError, ValueError):
+        return 0, 0
+    return prompt, completion
+
+
+def _validate_messages(messages: list[dict[str, str]]) -> None:
+    if not messages or len(messages) > 100:
+        raise ValueError("LLM request must contain between 1 and 100 messages.")
+    total = 0
+    for message in messages:
+        role = message.get("role")
+        content = message.get("content")
+        if role not in {"system", "user", "assistant"} or not isinstance(content, str):
+            raise ValueError("LLM messages require a supported role and string content.")
+        total += len(content)
+        if total > _MAX_PROMPT_CHARS:
+            raise ValueError(
+                f"LLM prompt exceeds the {_MAX_PROMPT_CHARS:,}-character safety limit."
+            )
+
+
+def validate_llm_base_url(base_url: str, provider: str, api_key: str | None) -> None:
+    parsed = urlparse(base_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("LLM_BASE_URL must be a complete HTTP(S) URL.")
+    if parsed.username or parsed.password:
+        raise ValueError("LLM_BASE_URL must not contain embedded credentials.")
+    local = parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+    explicitly_private_ollama = (
+        provider == "ollama"
+        and not api_key
+        and settings.allow_private_network_services
+    )
+    if parsed.scheme != "https" and not local and not explicitly_private_ollama:
+        raise ValueError(
+            "Remote LLM endpoints require HTTPS; plain HTTP is limited to localhost "
+            "or an explicitly enabled private Ollama service."
+        )
+
+
+def _completion_content(data: object) -> str:
+    if not isinstance(data, dict):
+        raise ValueError("LLM gateway response is not a JSON object.")
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        raise ValueError("LLM gateway response has no completion choice.")
+    message = choices[0].get("message")
+    if not isinstance(message, dict) or not isinstance(message.get("content"), str):
+        raise ValueError("LLM gateway response has no text content.")
+    content = str(message["content"])
+    if len(content) > _MAX_COMPLETION_CHARS:
+        raise ValueError("LLM completion exceeds the response safety limit.")
+    return content
+
+
+def _anthropic_content(data: object) -> str:
+    if not isinstance(data, dict):
+        raise ValueError("Anthropic response is not a JSON object.")
+    blocks = data.get("content")
+    if not isinstance(blocks, list) or not blocks:
+        raise ValueError("Anthropic response has no content blocks.")
+    parts = [
+        str(block["text"])
+        for block in blocks
+        if isinstance(block, dict)
+        and block.get("type") == "text"
+        and isinstance(block.get("text"), str)
+    ]
+    if not parts:
+        raise ValueError("Anthropic response has no text content.")
+    content = "".join(parts)
+    if len(content) > _MAX_COMPLETION_CHARS:
+        raise ValueError("LLM completion exceeds the response safety limit.")
+    return content
+
+
+def _extract_anthropic_usage(data: dict[str, Any]) -> tuple[int, int]:
+    usage = data.get("usage") or {}
+    if not isinstance(usage, dict):
+        return 0, 0
+    try:
+        prompt = max(0, min(1_000_000_000, int(usage.get("input_tokens", 0) or 0)))
+        completion = max(0, min(1_000_000_000, int(usage.get("output_tokens", 0) or 0)))
+    except (TypeError, ValueError):
+        return 0, 0
+    return prompt, completion
 
 
 def _openai_compatible_chat(
@@ -176,6 +278,7 @@ def _openai_compatible_chat(
 
     headers = {"Content-Type": "application/json"}
     key = settings.llm_api_key
+    validate_llm_base_url(base, provider, key)
     if key:
         headers["Authorization"] = f"Bearer {key}"
 
@@ -191,9 +294,11 @@ def _openai_compatible_chat(
 
     started = time.monotonic()
     retries = 0
+    attempts_made = 0
     last_error: Exception | None = None
 
     for attempt in range(_MAX_ATTEMPTS):
+        attempts_made = attempt + 1
         if attempt:
             retries += 1
         try:
@@ -226,8 +331,14 @@ def _openai_compatible_chat(
                 continue
             break
 
-        response.raise_for_status()
-        data: dict[str, Any] = response.json()
+        try:
+            response.raise_for_status()
+            raw_data: object = response.json()
+            content = _completion_content(raw_data)
+            data = raw_data if isinstance(raw_data, dict) else {}
+        except Exception as exc:
+            last_error = exc
+            break
         prompt_tokens, completion_tokens = _extract_usage(data)
         duration = time.monotonic() - started
         telemetry.record(
@@ -250,7 +361,7 @@ def _openai_compatible_chat(
             completion_tokens,
             retries,
         )
-        return str(data["choices"][0]["message"]["content"])
+        return content
 
     duration = time.monotonic() - started
     telemetry.record(
@@ -264,7 +375,120 @@ def _openai_compatible_chat(
             error=str(last_error),
         )
     )
-    raise RuntimeError(f"LLM call failed after {_MAX_ATTEMPTS} attempts: {last_error}")
+    raise RuntimeError(f"LLM call failed after {attempts_made} attempt(s): {last_error}")
+
+
+def _anthropic_chat(
+    messages: list[dict[str, str]],
+    schema: type[BaseModel] | None,
+    schema_name: str,
+) -> str:
+    """Call Anthropic's Messages API without a third-party routing layer."""
+    provider = "anthropic"
+    key = settings.anthropic_api_key
+    if not key:
+        raise RuntimeError("LLM_PROVIDER=anthropic requires ANTHROPIC_API_KEY.")
+    base = settings.llm_base_url or _DEFAULT_BASE_URLS[provider]
+    validate_llm_base_url(base, provider, key)
+
+    system_parts = [message["content"] for message in messages if message["role"] == "system"]
+    api_messages = [
+        {"role": message["role"], "content": message["content"]}
+        for message in messages
+        if message["role"] in {"user", "assistant"}
+    ]
+    if not api_messages:
+        raise ValueError("Anthropic requests require at least one user or assistant message.")
+    if schema is not None:
+        schema_instruction = (
+            f"Return only JSON matching the {schema_name} schema: "
+            f"{json.dumps(schema.model_json_schema(), ensure_ascii=False, separators=(',', ':'))}"
+        )
+        if sum(len(part) for part in system_parts) + len(schema_instruction) > _MAX_PROMPT_CHARS:
+            raise ValueError("Structured-output schema exceeds the prompt safety limit.")
+        system_parts.append(schema_instruction)
+
+    payload: dict[str, Any] = {
+        "model": settings.llm_model,
+        "messages": api_messages,
+        "max_tokens": 4096,
+        "temperature": settings.llm_temperature,
+    }
+    if system_parts:
+        payload["system"] = "\n\n".join(system_parts)
+    headers = {
+        "Content-Type": "application/json",
+        "x-api-key": key,
+        "anthropic-version": "2023-06-01",
+    }
+
+    started = time.monotonic()
+    retries = 0
+    attempts_made = 0
+    last_error: Exception | None = None
+    for attempt in range(_MAX_ATTEMPTS):
+        attempts_made = attempt + 1
+        if attempt:
+            retries += 1
+        try:
+            response = httpx.post(
+                anthropic_messages_url(base),
+                json=payload,
+                headers=headers,
+                timeout=settings.llm_call_timeout,
+            )
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            last_error = exc
+            if attempt + 1 < _MAX_ATTEMPTS:
+                log.warning("[llm] transient Anthropic error (attempt %d): %s", attempt + 1, exc)
+                _sleep(_backoff(attempt))
+                continue
+            break
+
+        status = int(getattr(response, "status_code", 200))
+        if status in _RETRYABLE_STATUS:
+            last_error = RuntimeError(f"HTTP {status} from Anthropic")
+            if attempt + 1 < _MAX_ATTEMPTS:
+                log.warning("[llm] retryable Anthropic HTTP %d (attempt %d)", status, attempt + 1)
+                _sleep(_backoff(attempt))
+                continue
+            break
+        try:
+            response.raise_for_status()
+            raw_data: object = response.json()
+            content = _anthropic_content(raw_data)
+            data = raw_data if isinstance(raw_data, dict) else {}
+        except Exception as exc:
+            last_error = exc
+            break
+        prompt_tokens, completion_tokens = _extract_anthropic_usage(data)
+        duration = time.monotonic() - started
+        telemetry.record(
+            LLMCallRecord(
+                provider=provider,
+                model=settings.llm_model,
+                duration_s=round(duration, 3),
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                retries=retries,
+                structured=schema is not None,
+            )
+        )
+        return content
+
+    duration = time.monotonic() - started
+    telemetry.record(
+        LLMCallRecord(
+            provider=provider,
+            model=settings.llm_model,
+            duration_s=round(duration, 3),
+            retries=retries,
+            structured=schema is not None,
+            ok=False,
+            error=str(last_error),
+        )
+    )
+    raise RuntimeError(f"LLM call failed after {attempts_made} attempt(s): {last_error}")
 
 
 def call_llm(
@@ -279,33 +503,13 @@ def call_llm(
     Callers keep their tolerant JSON parsing as a second net — gateways
     without ``response_format`` support are detected and handled here.
     """
-    if settings.llm_provider.lower() in _OPENAI_COMPATIBLE:
+    _validate_messages(messages)
+    provider = settings.llm_provider.lower()
+    if provider in _OPENAI_COMPATIBLE:
         return _openai_compatible_chat(messages, schema, schema_name)
-
-    # anthropic (or anything else CrewAI/litellm can route) via the CrewAI adapter.
-    from job_agent.agents.scout import _get_llm
-
-    started = time.monotonic()
-    try:
-        raw = cast(Any, _get_llm()).call(messages=messages)
-    except Exception as exc:
-        telemetry.record(
-            LLMCallRecord(
-                provider=settings.llm_provider,
-                model=settings.llm_model,
-                duration_s=round(time.monotonic() - started, 3),
-                ok=False,
-                error=str(exc),
-            )
-        )
-        raise
-    telemetry.record(
-        LLMCallRecord(
-            provider=settings.llm_provider,
-            model=settings.llm_model,
-            duration_s=round(time.monotonic() - started, 3),
-        )
+    if provider == "anthropic":
+        return _anthropic_chat(messages, schema, schema_name)
+    raise ValueError(
+        f"Unsupported LLM_PROVIDER='{settings.llm_provider}'. Expected one of: "
+        "ollama, openai, kiconnect, anthropic, groq."
     )
-    if not isinstance(raw, str):
-        return str(raw)
-    return raw

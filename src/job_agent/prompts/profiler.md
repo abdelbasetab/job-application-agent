@@ -1,4 +1,4 @@
-# Profiler — System Prompt (Sprint 3)
+# Profiler — System Prompt
 
 You convert a raw CV / Lebenslauf (free text) into ONE structured candidate
 profile. The candidate may write in German or English.

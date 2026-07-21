@@ -67,5 +67,39 @@ def test_select_embedding_function_uses_kiconnect_when_configured(
     fn, tag = profile_index._select_embedding_function()
 
     assert isinstance(fn, profile_index.KIConnectEmbeddingFunction)
-    assert tag == "kiconnect"
+    assert tag.startswith("gateway_")
     assert calls == [["probe"]]
+
+
+def test_embedding_function_rejects_remote_plain_http() -> None:
+    with pytest.raises(ValueError, match="require HTTPS"):
+        profile_index.KIConnectEmbeddingFunction(
+            model="embedding-model",
+            base_url="http://gateway.example/v1",
+            api_key="secret-key",
+        )
+
+
+def test_embedding_function_rejects_invalid_vector_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            pass
+
+        def json(self) -> dict:
+            return {"data": [{"embedding": [0.1, float("nan")]}]}
+
+    monkeypatch.setattr(
+        profile_index.httpx,
+        "post",
+        lambda *_args, **_kwargs: FakeResponse(),
+    )
+    fn = profile_index.KIConnectEmbeddingFunction(
+        model="embedding-model",
+        base_url="https://gateway.example/v1",
+        api_key="secret-key",
+    )
+
+    with pytest.raises(ValueError, match="non-finite"):
+        fn(["profile"])

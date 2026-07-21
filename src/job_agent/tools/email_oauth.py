@@ -17,7 +17,7 @@ from urllib.parse import urlencode
 
 import httpx
 
-from job_agent.tools.email_account import EmailAccount
+from job_agent.tools.email_account import EmailAccount, account_from_mapping
 from job_agent.utils.config import settings
 
 UTC = timezone.utc  # noqa: UP017
@@ -102,6 +102,7 @@ def build_authorization_url(
     redirect_uri: str,
     state: str,
     login_hint: str = "",
+    code_challenge: str = "",
 ) -> str:
     if not provider.configured:
         raise ValueError(f"{provider.label} OAuth ist nicht konfiguriert.")
@@ -116,6 +117,9 @@ def build_authorization_url(
     }
     if login_hint:
         params["login_hint"] = login_hint
+    if code_challenge:
+        params["code_challenge"] = code_challenge
+        params["code_challenge_method"] = "S256"
     return f"{provider.auth_url}?{urlencode(params)}"
 
 
@@ -125,17 +129,21 @@ def exchange_code_for_account(
     code: str,
     redirect_uri: str,
     email_address: str,
+    code_verifier: str = "",
     http_post: HttpPost = httpx.post,
 ) -> EmailAccount:
+    request_data = {
+        "client_id": provider.client_id,
+        "client_secret": provider.client_secret,
+        "code": code,
+        "grant_type": "authorization_code",
+        "redirect_uri": redirect_uri,
+    }
+    if code_verifier:
+        request_data["code_verifier"] = code_verifier
     token = _token_request(
         provider,
-        {
-            "client_id": provider.client_id,
-            "client_secret": provider.client_secret,
-            "code": code,
-            "grant_type": "authorization_code",
-            "redirect_uri": redirect_uri,
-        },
+        request_data,
         http_post=http_post,
     )
     return account_from_oauth_token(provider, token, email_address=email_address)
@@ -168,7 +176,7 @@ def refresh_oauth_account(
         "token_scope": str(token.get("scope") or account.token_scope),
         "token_expires_at": _expires_at(token),
     }
-    return EmailAccount(**_email_account_kwargs(merged))
+    return account_from_mapping(merged, fallback_email=account.email_address)
 
 
 def account_from_oauth_token(
@@ -196,7 +204,7 @@ def account_from_oauth_token(
         "token_expires_at": _expires_at(token),
         "use_tls": True,
     }
-    return EmailAccount(**_email_account_kwargs(payload))
+    return account_from_mapping(payload, fallback_email=email)
 
 
 def _token_request(
@@ -228,7 +236,8 @@ def _expires_at(token: dict[str, Any]) -> str:
             seconds = 3600
     else:
         seconds = 3600
-    return (datetime.now(UTC) + timedelta(seconds=max(60, seconds))).isoformat()
+    bounded_seconds = max(60, min(seconds, 365 * 24 * 60 * 60))
+    return (datetime.now(UTC) + timedelta(seconds=bounded_seconds)).isoformat()
 
 
 def _provider_status(provider: OAuthProvider) -> dict[str, Any]:
@@ -238,8 +247,3 @@ def _provider_status(provider: OAuthProvider) -> dict[str, Any]:
         "configured": provider.configured,
         "scope": provider.scope,
     }
-
-
-def _email_account_kwargs(payload: dict[str, Any]) -> dict[str, Any]:
-    allowed = set(EmailAccount.__dataclass_fields__)
-    return {key: value for key, value in payload.items() if key in allowed}

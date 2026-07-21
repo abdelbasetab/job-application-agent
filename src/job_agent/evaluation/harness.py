@@ -154,7 +154,12 @@ def evaluate(
     cases: list[GoldenCase] | None = None,
     compare_llm_to_deterministic: bool = True,
 ) -> EvalReport:
-    """Score the golden set with the Matcher and aggregate quality metrics."""
+    """Score the golden set and aggregate metrics with offline fallback tiers.
+
+    Remote embeddings are deliberately disabled here so ``use_llm=False`` is
+    reproducibly offline regardless of values loaded from the deployment
+    environment. ``use_llm=True`` may still call the explicitly selected LLM.
+    """
     golden = cases if cases is not None else load_golden_set()
     jobs = [case.job for case in golden]
 
@@ -165,6 +170,7 @@ def evaluate(
         threshold=threshold,
         use_llm=use_llm,
         profile_context=profile_context,
+        use_embeddings=False,
     )
     results = [
         CaseResult(case=case, match=match)
@@ -173,7 +179,13 @@ def evaluate(
 
     llm_comparison: dict[str, float] | None = None
     if use_llm and compare_llm_to_deterministic:
-        baseline = run_matcher(jobs, profile, threshold=threshold, use_llm=False)
+        baseline = run_matcher(
+            jobs,
+            profile,
+            threshold=threshold,
+            use_llm=False,
+            use_embeddings=False,
+        )
         llm_comparison = _compare(matches, baseline)
 
     report = EvalReport(

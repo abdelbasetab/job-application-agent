@@ -118,21 +118,57 @@ def export_application(
 def _new_pdf() -> Any:
     from fpdf import FPDF
 
-    pdf = FPDF(format="A4")
+    pdf: Any = FPDF(format="A4")
     pdf.set_auto_page_break(auto=True, margin=18)
     pdf.add_page()
     pdf.set_margins(25, 20, 25)
+    regular, bold, italic = _unicode_font_files()
+    if regular and bold and italic:
+        pdf.add_font("JobAgentUnicode", style="", fname=str(regular))
+        pdf.add_font("JobAgentUnicode", style="B", fname=str(bold))
+        pdf.add_font("JobAgentUnicode", style="I", fname=str(italic))
+        pdf._job_agent_unicode = True
+    else:
+        pdf._job_agent_unicode = False
     return pdf
+
+
+def _unicode_font_files() -> tuple[Path | None, Path | None, Path | None]:
+    candidates = [
+        (
+            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf"),
+        ),
+        (
+            Path("C:/Windows/Fonts/arial.ttf"),
+            Path("C:/Windows/Fonts/arialbd.ttf"),
+            Path("C:/Windows/Fonts/ariali.ttf"),
+        ),
+    ]
+    for files in candidates:
+        if all(path.is_file() for path in files):
+            return files
+    return None, None, None
+
+
+def _set_font(pdf: Any, *, style: str = "", size: int = 11) -> None:
+    family = "JobAgentUnicode" if getattr(pdf, "_job_agent_unicode", False) else "Helvetica"
+    pdf.set_font(family, style=style, size=size)
+
+
+def _pdf_text(pdf: Any, text: str) -> str:
+    return text if getattr(pdf, "_job_agent_unicode", False) else _latin1(text)
 
 
 def _line(pdf: Any, text: str, *, height: float = 5.0, align: str = "L") -> None:
     from fpdf.enums import XPos, YPos
 
-    pdf.cell(0, height, _latin1(text), new_x=XPos.LMARGIN, new_y=YPos.NEXT, align=align)
+    pdf.cell(0, height, _pdf_text(pdf, text), new_x=XPos.LMARGIN, new_y=YPos.NEXT, align=align)
 
 
 def _para(pdf: Any, text: str, *, height: float = 6.0) -> None:
-    pdf.multi_cell(0, height, _latin1(text))
+    pdf.multi_cell(0, height, _pdf_text(pdf, text))
 
 
 def _render_cover_letter(
@@ -143,13 +179,13 @@ def _render_cover_letter(
 ) -> None:
     pdf = _new_pdf()
 
-    pdf.set_font("Helvetica", size=10)
+    _set_font(pdf, size=10)
     for line in [profile.name, profile.location, profile.email or "", profile.phone or ""]:
         if line:
             _line(pdf, line)
     pdf.ln(6)
 
-    pdf.set_font("Helvetica", size=11)
+    _set_font(pdf, size=11)
     _line(pdf, job.company)
     if job.location:
         _line(pdf, job.location)
@@ -164,12 +200,12 @@ def _render_cover_letter(
         collapsed = " ".join(paragraph.split())
         if not collapsed:
             continue
-        pdf.set_font("Helvetica", size=11)
+        _set_font(pdf, size=11)
         _para(pdf, collapsed)
         pdf.ln(2)
 
     pdf.ln(4)
-    pdf.set_font("Helvetica", style="I", size=9)
+    _set_font(pdf, style="I", size=9)
     _para(pdf, "Anlagen: Lebenslauf")
     pdf.output(str(path))
 
@@ -192,16 +228,16 @@ def _tailored_skills(profile: UserProfile, match: MatchResult | None) -> list[st
 def _render_cv(path: Path, profile: UserProfile, match: MatchResult | None = None) -> None:
     pdf = _new_pdf()
 
-    pdf.set_font("Helvetica", style="B", size=18)
+    _set_font(pdf, style="B", size=18)
     _line(pdf, profile.name, height=9)
-    pdf.set_font("Helvetica", size=12)
+    _set_font(pdf, size=12)
     if profile.headline:
         _line(pdf, profile.headline, height=6)
     contact = " - ".join(
         part for part in [profile.location, profile.email or "", profile.phone or ""] if part
     )
     if contact:
-        pdf.set_font("Helvetica", size=10)
+        _set_font(pdf, size=10)
         _line(pdf, contact, height=6)
     pdf.ln(4)
 
@@ -209,40 +245,40 @@ def _render_cv(path: Path, profile: UserProfile, match: MatchResult | None = Non
     if skills:
         _section(pdf, "Kenntnisse")
         if match is not None and match.matched_skills:
-            pdf.set_font("Helvetica", style="I", size=9)
+            _set_font(pdf, style="I", size=9)
             _line(
                 pdf,
                 "Fokus fuer diese Bewerbung: " + ", ".join(match.matched_skills[:6]),
                 height=5,
             )
-        pdf.set_font("Helvetica", size=11)
+        _set_font(pdf, size=11)
         _para(pdf, ", ".join(skills))
         pdf.ln(2)
 
     if profile.experience:
         _section(pdf, "Berufserfahrung")
         for exp in profile.experience:
-            pdf.set_font("Helvetica", style="B", size=11)
+            _set_font(pdf, style="B", size=11)
             _line(pdf, f"{exp.role}, {exp.company}")
-            pdf.set_font("Helvetica", style="I", size=9)
+            _set_font(pdf, style="I", size=9)
             _line(pdf, f"{exp.start} - {exp.end or 'heute'}", height=5)
             if exp.summary:
-                pdf.set_font("Helvetica", size=10)
+                _set_font(pdf, size=10)
                 _para(pdf, exp.summary, height=5)
             pdf.ln(2)
 
     if profile.education:
         _section(pdf, "Ausbildung")
         for edu in profile.education:
-            pdf.set_font("Helvetica", style="B", size=11)
+            _set_font(pdf, style="B", size=11)
             _line(pdf, f"{edu.degree} {edu.field}".strip())
-            pdf.set_font("Helvetica", style="I", size=9)
+            _set_font(pdf, style="I", size=9)
             _line(pdf, f"{edu.institution} ({edu.start} - {edu.end or 'heute'})", height=5)
             pdf.ln(2)
 
     if profile.languages:
         _section(pdf, "Sprachen")
-        pdf.set_font("Helvetica", size=11)
+        _set_font(pdf, size=11)
         _para(pdf, ", ".join(f"{code}: {level}" for code, level in profile.languages.items()))
 
     pdf.output(str(path))
@@ -250,7 +286,7 @@ def _render_cv(path: Path, profile: UserProfile, match: MatchResult | None = Non
 
 def _section(pdf: Any, title: str) -> None:
     pdf.ln(2)
-    pdf.set_font("Helvetica", style="B", size=12)
+    _set_font(pdf, style="B", size=12)
     _line(pdf, title.upper(), height=7)
 
 

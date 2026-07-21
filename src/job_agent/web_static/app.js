@@ -13,6 +13,7 @@ const state = {
   pipelineRunning: false,
   emailSyncReady: false,
   authenticated: false,
+  registrationEnabled: false,
   authMode: "login",
   user: null,
   csrfToken: null,
@@ -81,6 +82,9 @@ const els = {
   imapPasswordInput: el("imapPasswordInput"),
   imapFolderInput: el("imapFolderInput"),
   emailUseTlsInput: el("emailUseTlsInput"),
+  emailDryRunInput: el("emailDryRunInput"),
+  emailSyncDryRunInput: el("emailSyncDryRunInput"),
+  emailAutoFollowUpInput: el("emailAutoFollowUpInput"),
   fillEmailFromProfileBtn: el("fillEmailFromProfileBtn"),
   saveEmailCredentialsBtn: el("saveEmailCredentialsBtn"),
   testEmailConnectionBtn: el("testEmailConnectionBtn"),
@@ -168,6 +172,12 @@ const els = {
   reportBtn: el("reportBtn"),
   interviewPrepBtn: el("interviewPrepBtn"),
   interviewPrepPanel: el("interviewPrepPanel"),
+  currentPasswordInput: el("currentPasswordInput"),
+  newPasswordInput: el("newPasswordInput"),
+  changePasswordBtn: el("changePasswordBtn"),
+  deletePasswordInput: el("deletePasswordInput"),
+  deleteConfirmInput: el("deleteConfirmInput"),
+  deleteAccountBtn: el("deleteAccountBtn"),
 };
 
 /* ----------------------------- toasts ------------------------------ */
@@ -200,7 +210,7 @@ const AGENT_STEPS = [
 const VIEW_TITLES = {
   profil: "Profil",
   suche: "Jobs finden",
-  inbox: "URL-Inbox",
+  inbox: "Portal- & URL-Inbox",
   bewerbungen: "Bewerbungen",
   followups: "Follow-up-Radar",
   einstellungen: "Einstellungen",
@@ -228,6 +238,7 @@ if (els.themeToggle) {
 
 /* ----------------------------- auth -------------------------------- */
 function setAuthMode(mode) {
+  if (mode === "register" && !state.registrationEnabled) mode = "login";
   state.authMode = mode;
   const register = mode === "register";
   els.loginTabBtn.classList.toggle("is-active", !register);
@@ -236,6 +247,20 @@ function setAuthMode(mode) {
   els.authPasswordInput.autocomplete = register ? "new-password" : "current-password";
   els.authSubmitBtn.textContent = register ? "Account erstellen" : "Einloggen";
   els.authMessage.textContent = "";
+}
+
+async function loadAuthConfig() {
+  try {
+    const res = await fetch("/api/auth/config");
+    const data = await res.json();
+    state.registrationEnabled = Boolean(res.ok && data.registration_enabled);
+  } catch {
+    state.registrationEnabled = false;
+  }
+  if (els.registerTabBtn) {
+    els.registerTabBtn.classList.toggle("is-hidden", !state.registrationEnabled);
+  }
+  if (!state.registrationEnabled && state.authMode === "register") setAuthMode("login");
 }
 
 function showAuthenticated(user) {
@@ -255,6 +280,7 @@ function showAuth() {
 }
 
 async function checkAuth() {
+  await loadAuthConfig();
   try {
     const res = await fetch("/api/auth/me");
     const data = await res.json();
@@ -450,6 +476,8 @@ function setBusy(busy) {
     els.connectMicrosoftBtn,
     els.startAutopilotScheduleBtn,
     els.stopAutopilotScheduleBtn,
+    els.changePasswordBtn,
+    els.deleteAccountBtn,
   ].forEach((b) => {
     if (b) b.disabled = busy;
   });
@@ -643,7 +671,9 @@ function renderEmailIdentity(identity) {
   if (!els.emailIdentityPanel || !identity) return;
   const smtpReady = Boolean(identity.smtp_ready);
   const imapReady = Boolean(identity.imap_ready);
-  const source = identity.account_source === "local" ? "Lokal gespeichert" : ".env";
+  const source = identity.account_source === "local"
+    ? "Lokal gespeichert"
+    : identity.account_source === "env" ? ".env (CLI)" : "Nicht konfiguriert";
   const badgeClass = smtpReady && imapReady ? "ok" : smtpReady || imapReady ? "warn" : "muted";
   if (els.emailConnectionBadge) {
     els.emailConnectionBadge.className = `email-badge ${badgeClass}`;
@@ -684,6 +714,9 @@ function fillEmailCredentialForm(identity = state.emailIdentity) {
   if (els.imapPasswordInput) els.imapPasswordInput.value = "";
   if (els.imapFolderInput) els.imapFolderInput.value = account.imap_folder || "INBOX";
   if (els.emailUseTlsInput) els.emailUseTlsInput.checked = account.use_tls !== false;
+  if (els.emailDryRunInput) els.emailDryRunInput.checked = account.dry_run !== false;
+  if (els.emailSyncDryRunInput) els.emailSyncDryRunInput.checked = account.sync_dry_run !== false;
+  if (els.emailAutoFollowUpInput) els.emailAutoFollowUpInput.checked = account.auto_follow_up_send === true;
 }
 
 function fillEmailFromProfile() {
@@ -696,6 +729,11 @@ function fillEmailFromProfile() {
 }
 
 async function saveEmailCredentials() {
+  const realSend = els.emailDryRunInput && !els.emailDryRunInput.checked;
+  const realSync = els.emailSyncDryRunInput && !els.emailSyncDryRunInput.checked;
+  if ((realSend || realSync) && !window.confirm(
+    "Du deaktivierst mindestens einen Dry-run. Dadurch können echte E-Mails gesendet oder Tracker-Status automatisch geändert werden. Fortfahren?"
+  )) return;
   setBusy(true);
   try {
     const fallbackEmail = bestIdentityEmail();
@@ -712,6 +750,9 @@ async function saveEmailCredentials() {
       imap_password: els.imapPasswordInput ? els.imapPasswordInput.value : "",
       imap_folder: els.imapFolderInput ? els.imapFolderInput.value : "INBOX",
       use_tls: els.emailUseTlsInput ? els.emailUseTlsInput.checked : true,
+      dry_run: els.emailDryRunInput ? els.emailDryRunInput.checked : true,
+      sync_dry_run: els.emailSyncDryRunInput ? els.emailSyncDryRunInput.checked : true,
+      auto_follow_up_send: els.emailAutoFollowUpInput ? els.emailAutoFollowUpInput.checked : false,
     };
     const res = await fetch("/api/email-credentials", {
       method: "POST",
@@ -1055,6 +1096,14 @@ function payload() {
   return data;
 }
 async function runPipeline() {
+  if (!state.profileReady) {
+    showToast("Bitte zuerst ein eigenes Profil erstellen oder das Demo-Profil bewusst laden.");
+    location.hash = "#/profil";
+    return;
+  }
+  if (els.resetInput?.checked && !window.confirm(
+    "Vorherige Jobs, Bewertungen, Entwürfe und Statushistorien dieses Kontos wirklich löschen? Profil und Mail-Audit bleiben erhalten."
+  )) return;
   setBusy(true);
   state.pipelineRunning = true;
   if (els.searchStateFact) els.searchStateFact.textContent = "Laeuft";
@@ -1176,11 +1225,6 @@ function remoteLabel(remote) {
   if (remote === false) return "Vor Ort";
   return "Remote: k. A.";
 }
-function remoteClass(remote) {
-  if (remote === true) return "yes";
-  if (remote === false) return "no";
-  return "unknown";
-}
 function recommendationLabel(value) {
   if (value === "strong") return "Sehr gute Priorität";
   if (value === "good") return "Gute Priorität";
@@ -1223,35 +1267,6 @@ function renderJobs() {
         <span class="score-meter ${mod}">${scoreText}</span>
         ${statusChip}
       </div>
-    </div>`;
-  }).join("");
-  els.jobsBody.querySelectorAll(".job-row").forEach((row) =>
-    row.addEventListener("click", () => {
-      state.selectedJobId = row.dataset.id;
-      renderJobs();
-      renderDetail();
-      renderLetter();
-    })
-  );
-  return;
-
-  if (!state.jobs.length) {
-    els.jobsBody.innerHTML = '<div class="empty">Noch keine Jobs — starte oben eine Suche.</div>';
-    return;
-  }
-  els.jobsBody.innerHTML = state.jobs.map((job) => {
-    const score = typeof job.score === "number" ? job.score : null;
-    const mod = scoreModifier(score, job.risk_level);
-    const riskChip = job.risk_level && job.risk_level !== "low"
-      ? `<span class="chip risk ${escapeAttr(job.risk_level)}">${riskShort(job.risk_level)}</span>` : "";
-    const statusChip = job.status ? `<span class="chip status">${escapeHtml(job.status)}</span>` : "";
-    return `<div class="job-row ${job.id === state.selectedJobId ? "selected" : ""}" data-id="${escapeAttr(job.id)}">
-      <div class="jr-ava">${escapeHtml(companyInitials(job.company))}</div>
-      <div class="jr-main">
-        <div class="jr-title">${escapeHtml(job.title)}</div>
-        <div class="jr-sub">${escapeHtml(job.company)} · ${escapeHtml(job.location)}${job.remote ? " · Remote" : ""} · ${escapeHtml(job.source_label || job.source)}</div>
-      </div>
-      <div class="jr-right">${riskChip}<span class="chip score ${mod}">${score === null ? "–" : Math.round(score * 100) + "%"}</span>${statusChip}</div>
     </div>`;
   }).join("");
   els.jobsBody.querySelectorAll(".job-row").forEach((row) =>
@@ -1356,7 +1371,6 @@ function applyRecipientSuggestions(job) {
 }
 
 function renderDetail() {
-  {
   const job = selectedJob();
   if (els.checkLivenessBtn) els.checkLivenessBtn.disabled = !job;
   renderLivenessBadge(job);
@@ -1389,47 +1403,6 @@ function renderDetail() {
     detailSection("Risiko", riskBlock(job), false, "Qualitaets- und Scam-Signale"),
     detailSection("Begruendung", `<p class="reasoning-text">${escapeHtml(job.rationale || "-")}</p>`, false, "Warum diese Bewertung")
   ].join("");
-  return;
-  }
-
-  const job = selectedJob();
-  if (els.checkLivenessBtn) els.checkLivenessBtn.disabled = !job;
-  renderLivenessBadge(job);
-  if (!job) {
-    els.detailTitle.textContent = "Details";
-    els.jobLink.style.visibility = "hidden";
-    els.jobDetail.className = "detail-body empty-detail";
-    els.jobDetail.textContent = "Keine Auswahl";
-    if (els.emailRecipientInput) els.emailRecipientInput.value = "";
-    return;
-  }
-  els.detailTitle.textContent = job.title;
-  els.jobLink.href = job.url;
-  els.jobLink.style.visibility = "visible";
-  if (els.emailRecipientInput) els.emailRecipientInput.value = job.contact_email || "";
-  els.jobDetail.className = "detail-body";
-  const score = typeof job.score === "number" ? job.score : null;
-  const mod = scoreModifier(score, job.risk_level);
-  els.jobDetail.innerHTML = `
-    <div>
-      <h3>${escapeHtml(job.company)}</h3>
-      <div class="detail-meta">
-        <span>${escapeHtml(job.location)}</span>
-        <span>${escapeHtml(job.source_label || job.source)}</span>
-        <span class="remote-tag ${remoteClass(job.remote)}">${remoteLabel(job.remote)}</span>
-        ${job.employment_type ? `<span>${escapeHtml(job.employment_type)}</span>` : ""}
-      </div>
-    </div>
-    <div class="score-main">
-      <div><h3>Score</h3><p class="score-explain">${escapeHtml(job.score_explanation || "-")}</p></div>
-      <span class="score-big ${mod}">${score === null ? "–" : Math.round(score * 100) + "%"}</span>
-    </div>
-    <div><h3>Score-Aufschlüsselung</h3>${scoreBreakdown(job.score_components || [])}</div>
-    <div><h3>Ghost-Job-Check</h3>${riskBlock(job)}</div>
-    <div><h3>Matcher-Begründung</h3><p>${escapeHtml(job.rationale || "-")}</p></div>
-    <div><h3>Passende Skills</h3><div class="skill-list">${pillList(job.matched_skills)}</div></div>
-    <div><h3>Fehlende Skills</h3><div class="skill-list">${pillList(job.missing_skills, "missing")}</div></div>
-    <div><h3>Beschreibung</h3><p class="job-description">${escapeHtml(job.description || "-")}</p></div>`;
 }
 
 function scoreBreakdown(components) {
@@ -1700,6 +1673,10 @@ async function recordFollowUp(jobId) {
 }
 async function sendFollowUpEmail(jobId) {
   const item = (state.followUps || []).find((f) => f.job_id === jobId);
+  const dryRun = state.config.email_dry_run !== false;
+  if (!dryRun && !window.confirm(
+    `Follow-up jetzt wirklich an ${item?.contact_email || "den gewählten Empfänger"} senden?`
+  )) return;
   setBusy(true);
   try {
     const res = await fetch("/api/send-follow-up-email", {
@@ -1710,6 +1687,8 @@ async function sendFollowUpEmail(jobId) {
           db_path: state.dbPath || els.dbPathInput.value,
           recipient: item ? item.contact_email || "" : "",
           body_md: item ? item.suggested_email_md : "",
+          confirm_real_send: !dryRun,
+          idempotency_key: `web:follow-up:${jobId}`,
         }),
     });
     const data = await res.json();
@@ -1752,7 +1731,7 @@ function renderInbox() {
   const items = state.inboxItems || [];
   if (!items.length) {
     els.inboxBody.innerHTML =
-      '<div class="empty">Die Inbox ist leer — Link oben einfügen oder eine Anzeige unten direkt bewerten.</div>';
+      '<div class="empty">Die Inbox ist leer — Portal-Link oben einfügen oder eine Anzeige unten direkt bewerten.</div>';
     return;
   }
   const statusChip = (status) => {
@@ -2121,6 +2100,11 @@ async function sendApplicationEmail() {
     showToast('Noch kein Anschreiben vorhanden. Bitte zuerst "Entwurf erstellen" klicken.');
     return;
   }
+  const dryRun = state.config.email_dry_run !== false;
+  const recipient = els.emailRecipientInput ? els.emailRecipientInput.value.trim() : "";
+  if (!dryRun && !window.confirm(
+    `Bewerbung jetzt wirklich an ${recipient || "den erkannten Empfänger"} senden${els.attachCvInput?.checked ? " (mit CV-Anhang)" : ""}?`
+  )) return;
   setBusy(true);
   if (els.statusText) els.statusText.textContent = "E-Mail wird gesendet ...";
   try {
@@ -2130,8 +2114,10 @@ async function sendApplicationEmail() {
       body: JSON.stringify({
         db_path: state.dbPath || els.dbPathInput.value,
         job_id: job.id,
-        recipient: els.emailRecipientInput ? els.emailRecipientInput.value : "",
+        recipient,
         attach_cv: els.attachCvInput ? els.attachCvInput.checked : false,
+        confirm_real_send: !dryRun,
+        idempotency_key: `web:application:${job.id}`,
       }),
     });
     const data = await res.json();
@@ -2314,6 +2300,63 @@ function escapeHtml(value) {
 }
 function escapeAttr(value) { return escapeHtml(value); }
 
+async function changePassword() {
+  const current = els.currentPasswordInput?.value || "";
+  const next = els.newPasswordInput?.value || "";
+  if (next.length < 12) {
+    showToast("Das neue Passwort muss mindestens 12 Zeichen haben.");
+    return;
+  }
+  setBusy(true);
+  try {
+    const res = await fetch("/api/auth/change-password", {
+      method: "POST",
+      headers: jsonHeaders(),
+      body: JSON.stringify({ current_password: current, new_password: next }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.error || "Passwort konnte nicht geändert werden");
+    appBooted = false;
+    state.csrfToken = null;
+    showAuth();
+    setAuthMode("login");
+    if (els.authMessage) els.authMessage.textContent = "Passwort geändert. Bitte erneut anmelden.";
+  } catch (err) {
+    showToast(err.message);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function deleteAccount() {
+  const password = els.deletePasswordInput?.value || "";
+  const confirmText = els.deleteConfirmInput?.value || "";
+  if (confirmText !== "DELETE") {
+    showToast("Bitte DELETE exakt eingeben.");
+    return;
+  }
+  if (!window.confirm("Account und alle zugehörigen Daten dauerhaft löschen?")) return;
+  setBusy(true);
+  try {
+    const res = await fetch("/api/auth/delete-account", {
+      method: "POST",
+      headers: jsonHeaders(),
+      body: JSON.stringify({ password, confirm: confirmText }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.error || "Account konnte nicht gelöscht werden");
+    appBooted = false;
+    state.csrfToken = null;
+    showAuth();
+    setAuthMode("login");
+    if (els.authMessage) els.authMessage.textContent = "Account und lokale Daten wurden gelöscht.";
+  } catch (err) {
+    showToast(err.message);
+  } finally {
+    setBusy(false);
+  }
+}
+
 /* --------------------------- config + wiring ----------------------- */
 async function loadConfig() {
   try {
@@ -2377,6 +2420,8 @@ if (els.authForm) els.authForm.addEventListener("submit", submitAuth);
 if (els.loginTabBtn) els.loginTabBtn.addEventListener("click", () => setAuthMode("login"));
 if (els.registerTabBtn) els.registerTabBtn.addEventListener("click", () => setAuthMode("register"));
 if (els.logoutBtn) els.logoutBtn.addEventListener("click", logout);
+if (els.changePasswordBtn) els.changePasswordBtn.addEventListener("click", changePassword);
+if (els.deleteAccountBtn) els.deleteAccountBtn.addEventListener("click", deleteAccount);
 function syncThresholdControl() {
   if (!els.thresholdInput || !els.thresholdOut) return;
   const min = Number(els.thresholdInput.min || 0);

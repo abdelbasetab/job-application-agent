@@ -38,6 +38,23 @@ def test_offline_eval_meets_quality_bar() -> None:
     assert payload["n_cases"] == len(report.results)
 
 
+def test_offline_eval_ignores_configured_remote_embeddings(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The default evaluator must not inherit remote embedding configuration."""
+    from job_agent.agents import matcher
+
+    monkeypatch.setattr(matcher.settings, "embedding_model", "remote-embedding")
+    monkeypatch.setattr(matcher.settings, "llm_base_url", "https://llm.example.test/v1")
+
+    def unexpected_embedding_call(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("offline evaluation attempted a remote embedding call")
+
+    monkeypatch.setattr(matcher, "_embedding_matches", unexpected_embedding_call)
+
+    report = evaluate(demo_profile(), use_llm=False)
+
+    assert report.telemetry_summary == {"calls": 0.0}
+
+
 def test_hard_gate_and_scam_cases() -> None:
     report = evaluate(demo_profile(), use_llm=False)
     by_id = {r.match.job_id: r for r in report.results}

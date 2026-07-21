@@ -1611,7 +1611,7 @@ body {
 }
 
 /* ============================================================
-   Sprint 5 — Toasts, URL-Inbox, Muster-Panel, Interview-Prep
+   Toasts, Portal-/URL-Inbox, Muster-Panel, Interview-Prep
    ============================================================ */
 .toast-host {
   position: fixed; right: 18px; bottom: 18px; z-index: 200;

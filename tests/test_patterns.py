@@ -5,8 +5,9 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from job_agent.demo_profile import demo_profile
 from job_agent.memory.store import Store
-from job_agent.schemas import ApplicationStatus, JobPosting
+from job_agent.schemas import ApplicationStatus, JobPosting, MatchResult
 from job_agent.tools.patterns import analyze_patterns
 
 _NOW = datetime(2026, 7, 10, 12, 0, 0)
@@ -52,6 +53,7 @@ def test_analyze_patterns_empty_store(tmp_path: Path) -> None:
 
 def test_analyze_patterns_funnel_rates_and_stale(tmp_path: Path) -> None:
     store = Store(tmp_path / "patterns.db")
+    fingerprint = store.save_profile(demo_profile(), source="test")
     seed = [
         ("p1", "draft", None, 1),
         ("p2", "submitted", 20, 20),   # stale: seit 20 Tagen keine Bewegung
@@ -63,6 +65,14 @@ def test_analyze_patterns_funnel_rates_and_stale(tmp_path: Path) -> None:
     for job_id, stage, submitted, updated in seed:
         store.save_job(_job(job_id, f"Job {job_id}", "RuhrTech GmbH"))
         store.upsert_status(_status(job_id, stage, submitted, updated))
+        store.save_match(
+            MatchResult(
+                job_id=job_id,
+                score=0.9 if job_id in {"p4", "p6"} else 0.6,
+                rationale="Test",
+            ),
+            fingerprint,
+        )
 
     report = analyze_patterns(store, now=_NOW)
 
@@ -78,5 +88,9 @@ def test_analyze_patterns_funnel_rates_and_stale(tmp_path: Path) -> None:
     assert stale_ids == ["p2"], "nur die 20-Tage-Bewerbung ist überfällig"
 
     assert report["top_companies"][0]["company"] == "RuhrTech GmbH"
+    high_band = next(row for row in report["score_outcomes"] if row["band"] == "85-100")
+    assert high_band["sent"] == 2
+    assert high_band["interviews"] == 2
+    assert high_band["sample_sufficient"] is False
     assert report["insights"]
     store.close()

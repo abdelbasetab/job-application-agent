@@ -60,6 +60,12 @@ def test_jobposting_rejects_unknown_source() -> None:
         _job(source="some-random-board")
 
 
+@pytest.mark.parametrize("salary", [(-1, 50_000), (70_000, 50_000)])
+def test_jobposting_rejects_invalid_salary_ranges(salary: tuple[int, int]) -> None:
+    with pytest.raises(ValidationError):
+        _job(salary_range=salary)
+
+
 def test_matchresult_score_bounds() -> None:
     with pytest.raises(ValidationError):
         MatchResult(job_id="x", score=1.5, rationale="r")
@@ -104,6 +110,13 @@ def test_userprofile_round_trip() -> None:
     blob = profile.model_dump_json()
     again = UserProfile.model_validate_json(blob)
     assert again == profile
+
+
+def test_nested_profile_models_reject_unknown_fields_and_invalid_salary() -> None:
+    with pytest.raises(ValidationError):
+        Experience(role="r", company="c", start="2024-01", invented=True)  # type: ignore[call-arg]
+    with pytest.raises(ValidationError):
+        Preferences(min_salary=-1)
 
 
 def test_applicationstatus_default_stage() -> None:

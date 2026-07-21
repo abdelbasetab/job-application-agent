@@ -21,6 +21,7 @@ covered must-have skills at 0.0, and risk penalties are applied last.
 from __future__ import annotations
 
 import json
+import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from difflib import SequenceMatcher
@@ -82,20 +83,29 @@ def run_matcher(
     threshold: float = 0.6,
     use_llm: bool | None = None,
     profile_context: list[str] | None = None,
+    use_embeddings: bool | None = None,
 ) -> list[MatchResult]:
     """Score every job against the profile.
 
     When `use_llm` is true, each job is sent to the configured LLM with the
     matcher prompt. Invalid or failed LLM calls fall back to the deterministic
-    rubric scorer for that job.
+    rubric scorer for that job. Set `use_embeddings=False` to force the
+    deterministic scorer to remain offline even when a remote embedding model
+    is configured; `None` preserves the configured runtime behavior.
     """
     llm_enabled = settings.enable_llm_agents if use_llm is None else use_llm
+    embeddings_enabled = (
+        bool(settings.embedding_model and settings.llm_base_url)
+        if use_embeddings is None
+        else use_embeddings
+    )
     if llm_enabled:
         runner = partial(
             _run_llm_matcher,
             profile=profile,
             threshold=threshold,
             profile_context=profile_context,
+            use_embeddings=embeddings_enabled,
         )
         if len(jobs) <= 1:
             return [runner(job) for job in jobs]
@@ -103,10 +113,18 @@ def run_matcher(
         workers = min(4, len(jobs))
         with ThreadPoolExecutor(max_workers=workers) as pool:
             return list(pool.map(runner, jobs))
-    return [_run_deterministic_match(job, profile) for job in jobs]
+    return [
+        _run_deterministic_match(job, profile, use_embeddings=embeddings_enabled)
+        for job in jobs
+    ]
 
 
-def _run_deterministic_match(job: JobPosting, profile: UserProfile) -> MatchResult:
+def _run_deterministic_match(
+    job: JobPosting,
+    profile: UserProfile,
+    *,
+    use_embeddings: bool,
+) -> MatchResult:
     profile_skills = _normalize(profile.skills)
     required = _normalize(job.requirements)
     nice = _normalize(job.nice_to_have)
@@ -115,7 +133,11 @@ def _run_deterministic_match(job: JobPosting, profile: UserProfile) -> MatchResu
     missing = sorted(required - profile_skills)
 
     # Tier 2: similarity matching for requirements tier 1 could not cover.
-    similar_pairs = _similar_skill_matches(missing, profile_skills)
+    similar_pairs = _similar_skill_matches(
+        missing,
+        profile_skills,
+        use_embeddings=use_embeddings,
+    )
     if similar_pairs:
         matched = sorted(set(matched) | set(similar_pairs))
         missing = [skill for skill in missing if skill not in similar_pairs]
@@ -133,14 +155,19 @@ def _run_deterministic_match(job: JobPosting, profile: UserProfile) -> MatchResu
         risk_level=risk_level,
         similar_pairs=similar_pairs,
     )
+    preference_block = _preference_block(job, profile)
 
     # The weighted rubric is the score (ADR-0006). Hard gate: a posting whose
     # must-have skills are all uncovered stays at 0.0 regardless of the softer
     # dimensions; the risk penalty is applied on top.
-    if required and not matched:
+    if preference_block:
+        score = 0.0
+    elif required and not matched:
         score = 0.0
     else:
         score = _weighted_score(components)
+        if not required:
+            score = min(score, _UNSTRUCTURED_REQUIREMENTS_CAP)
         # Level mismatch is a soft K.o.: a clearly senior role cannot become a
         # top recommendation for a student profile just because skills overlap.
         seniority = next(c for c in components if c.key == "seniority")
@@ -150,6 +177,9 @@ def _run_deterministic_match(job: JobPosting, profile: UserProfile) -> MatchResu
     recommendation = _recommendation(score, risk_level)
     score_summary = _score_summary(job, matched, required, risk_level, recommendation)
     rationale = _rationale(job, matched, required, missing, components, risk_flags, score)
+    if preference_block:
+        score_summary = f"Nicht passend: {preference_block}"
+        rationale = f"Praeferenz-Filter: {preference_block} {rationale}"
 
     result = MatchResult(
         job_id=job.id,
@@ -172,6 +202,7 @@ def _run_llm_matcher(
     profile: UserProfile,
     threshold: float,
     profile_context: list[str] | None,
+    use_embeddings: bool,
 ) -> MatchResult:
     try:
         prompt = _PROMPT_PATH.read_text(encoding="utf-8")
@@ -196,11 +227,18 @@ def _run_llm_matcher(
             schema_name="MatchResult",
         )
         result = _parse_match(raw, expected_job_id=job.id)
+        _validate_llm_match(result, job, profile)
+        result.evaluation_method = "llm"
+        result.evaluation_model = settings.llm_model
         log.info("[matcher:llm] %s -> score=%.2f", job.id, result.score)
         return result
     except Exception as exc:
         log.warning("[matcher:llm] falling back for %s: %s", job.id, exc)
-        fallback = _run_deterministic_match(job, profile)
+        fallback = _run_deterministic_match(
+            job,
+            profile,
+            use_embeddings=use_embeddings,
+        )
         if not fallback.rationale.startswith("LLM fallback:"):
             fallback.rationale = f"LLM fallback: {fallback.rationale}"
         return fallback
@@ -208,25 +246,65 @@ def _run_llm_matcher(
 
 def _parse_match(raw: Any, expected_job_id: str) -> MatchResult:
     if isinstance(raw, MatchResult):
-        return raw
-    if not isinstance(raw, str):
-        raise TypeError(f"expected string LLM output, got {type(raw)!r}")
-    text = raw.strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-    data = json.loads(text)
-    if not isinstance(data, dict):
-        raise ValueError("LLM matcher output was not a JSON object")
-    data["job_id"] = data.get("job_id") or expected_job_id
-    return MatchResult.model_validate(data)
+        result = raw
+    else:
+        if not isinstance(raw, str):
+            raise TypeError(f"expected string LLM output, got {type(raw)!r}")
+        text = raw.strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        data = json.loads(text)
+        if not isinstance(data, dict):
+            raise ValueError("LLM matcher output was not a JSON object")
+        if not data.get("job_id"):
+            raise ValueError("LLM matcher output omitted job_id")
+        result = MatchResult.model_validate(data)
+    if result.job_id != expected_job_id:
+        raise ValueError(
+            f"LLM matcher returned job_id {result.job_id!r}, expected {expected_job_id!r}"
+        )
+    return result
+
+
+def _validate_llm_match(
+    result: MatchResult,
+    job: JobPosting,
+    profile: UserProfile,
+) -> None:
+    """Reject structurally valid but semantically inconsistent LLM output."""
+    required = _normalize(job.requirements)
+    profile_skills = _normalize(profile.skills)
+    matched = _normalize(result.matched_skills)
+    missing = _normalize(result.missing_skills)
+    if matched & missing:
+        raise ValueError("LLM match lists the same skill as matched and missing")
+    if matched - required or missing - required:
+        raise ValueError("LLM match contains skills outside the job requirements")
+    if required and matched | missing != required:
+        raise ValueError("LLM match does not account for every required skill")
+    if matched - profile_skills:
+        raise ValueError("LLM claims a matched skill that is absent from the profile")
+    if required and not matched and result.score != 0:
+        raise ValueError("LLM score violates the zero-covered-must-have gate")
+    if not required and result.score > _UNSTRUCTURED_REQUIREMENTS_CAP:
+        raise ValueError("LLM score is too high without structured requirements")
+    if _preference_block(job, profile) and (result.score != 0 or result.recommendation != "skip"):
+        raise ValueError("LLM result violates a candidate preference gate")
+    expected_recommendation = _recommendation(result.score, result.risk_level)
+    if result.recommendation != expected_recommendation:
+        raise ValueError("LLM recommendation contradicts score/risk")
+    if result.score_components:
+        keys = [component.key for component in result.score_components]
+        if len(keys) != len(set(keys)) or sum(c.weight for c in result.score_components) != 100:
+            raise ValueError("LLM score components are duplicated or do not total 100%")
 
 
 def _canonical_skill(value: str) -> str:
     text = _clean_text(value)
     if not text:
         return text
-    for needle, canonical in _SKILL_ALIASES.items():
-        if needle in text:
+    for needle, canonical in sorted(_SKILL_ALIASES.items(), key=lambda item: -len(item[0])):
+        if re.search(rf"(?<![a-z0-9+#]){re.escape(needle)}(?![a-z0-9+#])", text):
             return canonical
     return text
 
@@ -258,7 +336,7 @@ def _score_components(
     risk_level: RiskLevel,
     similar_pairs: dict[str, str] | None = None,
 ) -> list[ScoreComponent]:
-    hard_score = _ratio_to_1_5(len(matched) / len(required)) if required else 3
+    hard_score = _ratio_to_1_5(len(matched) / len(required)) if required else 2
     hard_evidence = (
         f"{len(matched)}/{len(required)} Muss-Skills erkannt: {', '.join(matched) or 'keine'}."
         if required
@@ -365,9 +443,40 @@ def _matches_location(job_location: str, preferred: set[str]) -> bool:
     if not job_location:
         return False
     return any(
-        item and (item in job_location or job_location in item)
+        item
+        and (
+            _contains_phrase(job_location, item)
+            or _contains_phrase(item, job_location)
+        )
         for item in preferred
     )
+
+
+def _contains_phrase(text: str, phrase: str) -> bool:
+    return re.search(rf"(?<!\w){re.escape(phrase)}(?!\w)", text) is not None
+
+
+def _preference_block(job: JobPosting, profile: UserProfile) -> str:
+    company = _company_key(job.company)
+    for excluded in profile.preferences.excluded_companies:
+        excluded_key = _company_key(excluded)
+        if excluded_key and company and (
+            _contains_phrase(company, excluded_key) or _contains_phrase(excluded_key, company)
+        ):
+            return f"Unternehmen {job.company} ist ausgeschlossen."
+    minimum = profile.preferences.min_salary
+    if minimum is not None and job.salary_range is not None and job.salary_range[1] < minimum:
+        return (
+            f"Gehaltsobergrenze {job.salary_range[1]:,} EUR liegt unter dem Minimum "
+            f"von {minimum:,} EUR."
+        )
+    return ""
+
+
+def _company_key(value: str) -> str:
+    tokens = _clean_text(value).split()
+    legal = {"ag", "gbr", "gmbh", "inc", "kg", "ltd", "ohg", "se"}
+    return " ".join(token for token in tokens if token not in legal)
 
 
 def _seniority_component(job: JobPosting, profile: UserProfile) -> tuple[int, str]:
@@ -395,23 +504,112 @@ def _seniority_component(job: JobPosting, profile: UserProfile) -> tuple[int, st
 
 
 def _language_component(job: JobPosting, profile: UserProfile) -> tuple[int, str]:
-    text = _job_text(job)
-    langs = {key.lower() for key in profile.languages}
-    needs_de = any(term in text for term in ("deutsch", "german", "deutsche sprache"))
-    needs_en = any(term in text for term in ("englisch", "english", "english language"))
+    text = _job_text(job).casefold()
+    profile_levels = _profile_language_levels(profile.languages)
+    requested: list[tuple[str, str, str | None]] = []
+    for code, label, aliases in (
+        ("de", "Deutsch", ("deutsch", "deutschkenntnisse", "german", "german language")),
+        ("en", "Englisch", ("englisch", "englischkenntnisse", "english", "english language")),
+    ):
+        if any(re.search(rf"(?<!\w){re.escape(alias)}(?!\w)", text) for alias in aliases):
+            requested.append((code, label, _required_cefr(text, aliases)))
+    if not requested:
+        return 4, "Keine harte Sprachanforderung erkannt."
+
     missing: list[str] = []
-    if needs_de and "de" not in langs:
-        missing.append("Deutsch")
-    if needs_en and "en" not in langs:
-        missing.append("Englisch")
+    too_low: list[str] = []
+    for code, label, required_level in requested:
+        available = profile_levels.get(code)
+        if available is None:
+            missing.append(label)
+        elif required_level and _cefr_rank(available) < _cefr_rank(required_level):
+            too_low.append(f"{label} {available} statt {required_level}")
     if missing:
-        return 2, f"Sprachanforderung fehlt im Profil: {', '.join(missing)}."
-    if needs_de or needs_en:
-        required = " und ".join(
-            item for item, needed in (("Deutsch", needs_de), ("Englisch", needs_en)) if needed
-        )
-        return 5, f"Sprachanforderung erfuellt: {required}."
+        return 1, f"Sprachanforderung fehlt im Profil: {', '.join(missing)}."
+    if too_low:
+        return 2, f"Sprachniveau zu niedrig: {', '.join(too_low)}."
+    details = ", ".join(
+        f"{label} {required or profile_levels[code]}" for code, label, required in requested
+    )
+    if requested:
+        return 5, f"Sprachanforderung erfuellt: {details}."
     return 4, "Keine harte Sprachanforderung erkannt."
+
+
+_CEFR_ORDER = {"A1": 1, "A2": 2, "B1": 3, "B2": 4, "C1": 5, "C2": 6}
+
+
+def _profile_language_levels(languages: dict[str, str]) -> dict[str, str]:
+    aliases = {
+        "de": "de",
+        "deu": "de",
+        "deutsch": "de",
+        "german": "de",
+        "en": "en",
+        "eng": "en",
+        "englisch": "en",
+        "english": "en",
+    }
+    levels: dict[str, str] = {}
+    for raw_key, raw_level in languages.items():
+        code = aliases.get(_clean_text(raw_key))
+        if code:
+            levels[code] = _normalize_cefr(raw_level)
+    return levels
+
+
+def _normalize_cefr(value: str) -> str:
+    normalized = value.strip().upper()
+    match = re.search(r"\b([ABC][12])\b", normalized)
+    if match:
+        return match.group(1)
+    lowered = value.casefold()
+    if any(term in lowered for term in ("native", "mutter", "mother tongue")):
+        return "C2"
+    if any(term in lowered for term in ("fluent", "fliessend", "fließend")):
+        return "C1"
+    if any(term in lowered for term in ("advanced", "fortgeschritten")):
+        return "B2"
+    if any(term in lowered for term in ("basic", "grundkennt")):
+        return "A2"
+    return "A1"
+
+
+def _required_cefr(text: str, language_aliases: tuple[str, ...]) -> str | None:
+    language_spans = [
+        match.span()
+        for alias in language_aliases
+        for match in re.finditer(rf"(?<!\w){re.escape(alias)}(?!\w)", text)
+    ]
+    candidates: list[tuple[int, str]] = []
+    for match in re.finditer(r"(?<!\w)([abc][12])(?!\w)", text, flags=re.IGNORECASE):
+        distance = min((_span_distance(match.span(), span) for span in language_spans), default=999)
+        if distance <= 40:
+            candidates.append((distance, match.group(1).upper()))
+    qualitative = (
+        (r"\b(?:muttersprachlich|native)\b", "C2"),
+        (r"\b(?:verhandlungssicher|fliessend|fließend|fluent)\b", "C1"),
+        (r"\b(?:sehr\s+gut|very\s+good|advanced)\b", "B2"),
+        (r"\b(?:grundkenntnisse|basic)\b", "A2"),
+    )
+    for pattern, level in qualitative:
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            distance = min((_span_distance(match.span(), span) for span in language_spans), default=999)
+            if distance <= 40:
+                candidates.append((distance, level))
+    return min(candidates, default=(999, ""))[1] or None
+
+
+def _span_distance(left: tuple[int, int], right: tuple[int, int]) -> int:
+    if left[1] < right[0]:
+        return right[0] - left[1]
+    if right[1] < left[0]:
+        return left[0] - right[1]
+    return 0
+
+
+def _cefr_rank(value: str) -> int:
+    return _CEFR_ORDER.get(_normalize_cefr(value), 0)
 
 
 def _quality_component(risk_flags: list[str], risk_level: RiskLevel) -> tuple[int, str]:
@@ -431,9 +629,15 @@ _EMBED_COSINE_MIN = 0.75
 # A posting whose level clearly mismatches the profile (seniority score <= 2)
 # is capped below the "good" band — it can stay a maybe, never a strong.
 _SENIOR_MISMATCH_CAP = 0.55
+_UNSTRUCTURED_REQUIREMENTS_CAP = 0.49
 
 
-def _similar_skill_matches(missing: list[str], profile_skills: set[str]) -> dict[str, str]:
+def _similar_skill_matches(
+    missing: list[str],
+    profile_skills: set[str],
+    *,
+    use_embeddings: bool,
+) -> dict[str, str]:
     """Tier-2 skill matching — maps still-missing requirements to close profile skills.
 
     Uses the OpenAI-compatible ``/embeddings`` endpoint (semantic similarity)
@@ -442,7 +646,7 @@ def _similar_skill_matches(missing: list[str], profile_skills: set[str]) -> dict
     """
     if not missing or not profile_skills:
         return {}
-    if settings.embedding_model and settings.llm_base_url:
+    if use_embeddings and settings.embedding_model and settings.llm_base_url:
         try:
             return _embedding_matches(missing, sorted(profile_skills))
         except Exception as exc:
@@ -451,16 +655,15 @@ def _similar_skill_matches(missing: list[str], profile_skills: set[str]) -> dict
 
 
 def _fuzzy_matches(missing: list[str], profile_skills: set[str]) -> dict[str, str]:
-    result: dict[str, str] = {}
-    for req in missing:
-        best, best_ratio = "", 0.0
-        for have in profile_skills:
-            ratio = SequenceMatcher(None, req, have).ratio()
-            if ratio > best_ratio:
-                best, best_ratio = have, ratio
-        if best and best_ratio >= _FUZZY_RATIO_MIN:
-            result[req] = best
-    return result
+    candidates = sorted(
+        (
+            (SequenceMatcher(None, req, have).ratio(), req, have)
+            for req in missing
+            for have in profile_skills
+        ),
+        reverse=True,
+    )
+    return _one_to_one_matches(candidates, _FUZZY_RATIO_MIN)
 
 
 def _embedding_matches(missing: list[str], have: list[str]) -> dict[str, str]:
@@ -474,15 +677,25 @@ def _embedding_matches(missing: list[str], have: list[str]) -> dict[str, str]:
     vectors = embed(missing + have)
     missing_vecs, have_vecs = vectors[: len(missing)], vectors[len(missing) :]
 
-    result: dict[str, str] = {}
+    candidates: list[tuple[float, str, str]] = []
     for req, req_vec in zip(missing, missing_vecs, strict=True):
-        best, best_sim = "", 0.0
         for skill, skill_vec in zip(have, have_vecs, strict=True):
-            sim = _cosine(req_vec, skill_vec)
-            if sim > best_sim:
-                best, best_sim = skill, sim
-        if best and best_sim >= _EMBED_COSINE_MIN:
-            result[req] = best
+            candidates.append((_cosine(req_vec, skill_vec), req, skill))
+    return _one_to_one_matches(sorted(candidates, reverse=True), _EMBED_COSINE_MIN)
+
+
+def _one_to_one_matches(
+    candidates: list[tuple[float, str, str]], minimum: float
+) -> dict[str, str]:
+    result: dict[str, str] = {}
+    used_profile_skills: set[str] = set()
+    for similarity, required, available in candidates:
+        if similarity < minimum:
+            break
+        if required in result or available in used_profile_skills:
+            continue
+        result[required] = available
+        used_profile_skills.add(available)
     return result
 
 

@@ -1,10 +1,8 @@
 """Tracker agent — persists application state and drives follow-up cadence.
 
-The persistence part simply wraps the SQLite store. Sprint 4 adds the
-follow-up cadence on top: submitted applications that have seen no activity
-for N days are surfaced with a ready-to-send German follow-up draft. Nothing
-extra is stored — the cadence is derived from ``updated_at``, and recording a
-follow-up resets that clock via a note + timestamp update.
+Submitted applications that have seen no activity for N days are surfaced
+with a ready-to-send German follow-up draft. The cadence is derived from
+``updated_at``; recording a follow-up resets that clock via a timestamped note.
 """
 
 from __future__ import annotations
@@ -28,6 +26,15 @@ def run_tracker(
     notes: str = "",
 ) -> ApplicationStatus:
     """Persist the application and return its tracked status."""
+    store.save_application(application)
+    existing = store.get_status(application.job_id)
+    if existing is not None and status == "draft":
+        log.info(
+            "[tracker] refreshed draft for %s; preserving status %s",
+            application.job_id,
+            existing.status,
+        )
+        return existing
     record = ApplicationStatus(
         job_id=application.job_id,
         status=status,  # type: ignore[arg-type]
@@ -35,8 +42,7 @@ def run_tracker(
         updated_at=datetime.now(),
         notes=notes,
     )
-    store.upsert_status(record)
-    store.save_application(application)
+    store.upsert_status(record, event_type="application_tracked")
     log.info("[tracker] persisted %s → %s", application.job_id, record.status)
     return record
 
@@ -108,7 +114,7 @@ def record_follow_up(
         updated_at=reference,
         notes=merged[-1000:],
     )
-    store.upsert_status(record)
+    store.upsert_status(record, event_type="follow_up_recorded")
     log.info("[tracker] follow-up recorded for %s", job_id)
     return record
 

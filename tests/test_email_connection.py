@@ -25,7 +25,7 @@ def test_email_connection_checks_smtp_and_imap(monkeypatch) -> None:  # type: ig
         def ehlo(self) -> tuple[int, bytes]:
             return 250, b"ok"
 
-        def starttls(self) -> tuple[int, bytes]:
+        def starttls(self, context=None) -> tuple[int, bytes]:  # type: ignore[no-untyped-def]
             smtp_seen["tls"] = True
             return 220, b"ready"
 
@@ -37,7 +37,9 @@ def test_email_connection_checks_smtp_and_imap(monkeypatch) -> None:  # type: ig
             return 250, b"ok"
 
     class FakeIMAP:
-        def __init__(self, host: str, port: int, timeout: float) -> None:
+        def __init__(
+            self, host: str, port: int, ssl_context=None, timeout: float = 15.0
+        ) -> None:  # type: ignore[no-untyped-def]
             imap_seen.update({"host": host, "port": port, "timeout": timeout})
 
         def __enter__(self) -> FakeIMAP:
@@ -56,6 +58,7 @@ def test_email_connection_checks_smtp_and_imap(monkeypatch) -> None:  # type: ig
 
     monkeypatch.setattr(email_connection.smtplib, "SMTP", FakeSMTP)
     monkeypatch.setattr(email_connection.imaplib, "IMAP4_SSL", FakeIMAP)
+    monkeypatch.setattr(email_connection, "validate_public_host", lambda *_args, **_kwargs: "ok")
     account = account_from_mapping(
         {
             "email_address": "me@example.de",
@@ -97,7 +100,7 @@ def test_gmail_app_password_spaces_are_removed(monkeypatch) -> None:  # type: ig
         def ehlo(self) -> tuple[int, bytes]:
             return 250, b"ok"
 
-        def starttls(self) -> tuple[int, bytes]:
+        def starttls(self, context=None) -> tuple[int, bytes]:  # type: ignore[no-untyped-def]
             return 220, b"ready"
 
         def login(self, user: str, password: str) -> tuple[int, bytes]:
@@ -108,7 +111,9 @@ def test_gmail_app_password_spaces_are_removed(monkeypatch) -> None:  # type: ig
             return 250, b"ok"
 
     class FakeIMAP:
-        def __init__(self, host: str, port: int, timeout: float) -> None:
+        def __init__(
+            self, host: str, port: int, ssl_context=None, timeout: float = 15.0
+        ) -> None:  # type: ignore[no-untyped-def]
             imap_seen.update({"host": host, "port": port, "timeout": timeout})
 
         def __enter__(self) -> FakeIMAP:
@@ -126,6 +131,7 @@ def test_gmail_app_password_spaces_are_removed(monkeypatch) -> None:  # type: ig
 
     monkeypatch.setattr(email_connection.smtplib, "SMTP", FakeSMTP)
     monkeypatch.setattr(email_connection.imaplib, "IMAP4_SSL", FakeIMAP)
+    monkeypatch.setattr(email_connection, "validate_public_host", lambda *_args, **_kwargs: "ok")
     account = account_from_mapping(
         {
             "email_address": "max.mustermann.app@gmail.com",
@@ -160,14 +166,16 @@ def test_gmail_auth_failure_has_actionable_message(monkeypatch) -> None:  # type
         def ehlo(self) -> tuple[int, bytes]:
             return 250, b"ok"
 
-        def starttls(self) -> tuple[int, bytes]:
+        def starttls(self, context=None) -> tuple[int, bytes]:  # type: ignore[no-untyped-def]
             return 220, b"ready"
 
         def login(self, user: str, password: str) -> tuple[int, bytes]:
             raise smtplib.SMTPAuthenticationError(535, b"bad credentials")
 
     class FakeIMAP:
-        def __init__(self, host: str, port: int, timeout: float) -> None:
+        def __init__(
+            self, host: str, port: int, ssl_context=None, timeout: float = 15.0
+        ) -> None:  # type: ignore[no-untyped-def]
             pass
 
         def __enter__(self) -> FakeIMAP:
@@ -181,6 +189,7 @@ def test_gmail_auth_failure_has_actionable_message(monkeypatch) -> None:  # type
 
     monkeypatch.setattr(email_connection.smtplib, "SMTP", FakeSMTP)
     monkeypatch.setattr(email_connection.imaplib, "IMAP4_SSL", FakeIMAP)
+    monkeypatch.setattr(email_connection, "validate_public_host", lambda *_args, **_kwargs: "ok")
     account = account_from_mapping(
         {
             "email_address": "max.mustermann.app@gmail.com",
@@ -209,3 +218,20 @@ def test_email_connection_missing_credentials_is_safe() -> None:
     assert result["smtp"]["configured"] is False
     assert result["imap"]["ok"] is False
     assert result["imap"]["configured"] is False
+
+
+def test_email_connection_rejects_smtp_without_tls() -> None:
+    account = account_from_mapping(
+        {
+            "email_address": "me@example.de",
+            "smtp_host": "smtp.example.de",
+            "smtp_user": "me@example.de",
+            "smtp_password": "secret",
+            "use_tls": False,
+        }
+    )
+
+    result = email_connection.test_smtp_connection(account)
+
+    assert result["ok"] is False
+    assert "ohne TLS" in result["message"]

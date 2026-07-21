@@ -4,6 +4,10 @@ on:
   push:
     branches: [main, demo-final]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -11,48 +15,69 @@ concurrency:
 
 jobs:
   quality-gates:
+    name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    env:
+      ENABLE_LLM_AGENTS: "false"
+      ENABLE_PROFILE_MEMORY: "false"
+      EMAIL_DRY_RUN: "true"
+      EMAIL_SYNC_DRY_RUN: "true"
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: pyproject.toml
+          python-version: ${{ matrix.python-version }}
 
-      - name: Install project + dev tools
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.30"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install locked project and dev tools
+        run: uv sync --locked --extra dev
+
+      - name: Verify runtime export is current
         run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          uv export --locked --no-dev --no-emit-project --no-annotate --no-header --format requirements-txt --output-file requirements-runtime.lock
+          git diff --exit-code -- requirements-runtime.lock
 
-      - name: Ruff (lint)
-        run: ruff check src tests
+      - name: Audit runtime dependencies
+        run: uvx --from pip-audit==2.10.1 pip-audit --requirement requirements-runtime.lock --disable-pip --progress-spinner off
 
-      - name: Mypy (types)
-        run: mypy src
+      - name: Ruff
+        run: uv run ruff check src tests
 
-      - name: Pytest (offline suite + coverage floor)
-        run: pytest --cov=job_agent --cov-report=term-missing --cov-fail-under=60
+      - name: Mypy
+        run: uv run mypy src
 
-      - name: Matcher quality gate (golden-set eval)
-        run: python -m job_agent.main eval --json-out eval_report.json
+      - name: Pytest with coverage floor
+        run: uv run pytest --cov=job_agent --cov-report=term-missing --cov-fail-under=60
 
-      - name: Upload eval report
+      - name: Matcher quality gate
+        run: uv run python -m job_agent.main eval --json-out eval_report.json
+
+      - name: Upload evaluation report
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: eval-report
+          name: eval-report-py${{ matrix.python-version }}
           path: eval_report.json
           if-no-files-found: ignore
 
   docker-build:
+    needs: quality-gates
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-
-      - name: Build image
-        run: docker build -t job-agent:ci .
+      - name: Build production image
+        run: docker build --target runtime -t job-agent:ci .

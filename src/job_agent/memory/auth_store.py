@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import re
 import secrets
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -23,6 +24,8 @@ class AuthUser(TypedDict):
 
 _ITERATIONS = 240_000
 _SESSION_DAYS = 7
+_LOCAL_PART_RE = re.compile(r"[a-z0-9!#$%&'*+/=?^_`{|}~.-]{1,64}", re.IGNORECASE)
+_DOMAIN_LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", re.IGNORECASE)
 
 # Append-only migrations, tracked via PRAGMA user_version (see memory/store.py).
 _MIGRATIONS: list[str] = [
@@ -88,6 +91,8 @@ class AuthStore:
         return {"id": cursor.lastrowid, "email": normalized, "created_at": created_at}
 
     def authenticate(self, email: str, password: str) -> AuthUser | None:
+        if len(password) > 256:
+            return None
         normalized = _normalize_email(email)
         row = self._conn.execute(
             "SELECT id, email, password_hash, salt, created_at FROM users WHERE email = ?",
@@ -99,6 +104,41 @@ class AuthStore:
         if not hmac.compare_digest(expected, str(row[2])):
             return None
         return {"id": int(row[0]), "email": str(row[1]), "created_at": str(row[4])}
+
+    def user_count(self) -> int:
+        return int(self._conn.execute("SELECT COUNT(*) FROM users").fetchone()[0])
+
+    def change_password(self, user_id: int, current_password: str, new_password: str) -> None:
+        if len(current_password) > 256:
+            raise ValueError("Das aktuelle Passwort ist falsch.")
+        row = self._conn.execute(
+            "SELECT password_hash, salt FROM users WHERE id = ?", (user_id,)
+        ).fetchone()
+        if row is None or not hmac.compare_digest(
+            _hash_password(current_password, str(row[1])), str(row[0])
+        ):
+            raise ValueError("Das aktuelle Passwort ist falsch.")
+        _validate_password(new_password)
+        salt = secrets.token_hex(16)
+        with self._conn:
+            self._conn.execute(
+                "UPDATE users SET password_hash = ?, salt = ? WHERE id = ?",
+                (_hash_password(new_password, salt), salt, user_id),
+            )
+            self._conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+
+    def delete_user(self, user_id: int, password: str) -> None:
+        if len(password) > 256:
+            raise ValueError("Das Passwort ist falsch.")
+        row = self._conn.execute(
+            "SELECT password_hash, salt FROM users WHERE id = ?", (user_id,)
+        ).fetchone()
+        if row is None or not hmac.compare_digest(
+            _hash_password(password, str(row[1])), str(row[0])
+        ):
+            raise ValueError("Das Passwort ist falsch.")
+        with self._conn:
+            self._conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
 
     def create_session(self, user_id: int) -> str:
         self.purge_expired_sessions()
@@ -156,14 +196,28 @@ class AuthStore:
 
 def _normalize_email(email: str) -> str:
     normalized = email.strip().lower()
-    if "@" not in normalized or len(normalized) > 254:
+    if len(normalized) > 254 or normalized.count("@") != 1:
+        raise ValueError("Bitte eine gültige E-Mail-Adresse eingeben.")
+    local, domain = normalized.rsplit("@", 1)
+    labels = domain.split(".")
+    if (
+        not _LOCAL_PART_RE.fullmatch(local)
+        or local.startswith(".")
+        or local.endswith(".")
+        or ".." in local
+        or len(labels) < 2
+        or any(not _DOMAIN_LABEL_RE.fullmatch(label) for label in labels)
+        or len(labels[-1]) < 2
+    ):
         raise ValueError("Bitte eine gültige E-Mail-Adresse eingeben.")
     return normalized
 
 
 def _validate_password(password: str) -> None:
-    if len(password) < 8:
-        raise ValueError("Das Passwort muss mindestens 8 Zeichen haben.")
+    if len(password) < 12:
+        raise ValueError("Das Passwort muss mindestens 12 Zeichen haben.")
+    if len(password) > 256:
+        raise ValueError("Das Passwort darf hoechstens 256 Zeichen haben.")
 
 
 def _hash_password(password: str, salt: str) -> str:

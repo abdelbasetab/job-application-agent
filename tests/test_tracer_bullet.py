@@ -1,7 +1,7 @@
-"""End-to-end tracer bullet — proves all four agents talk to each other.
+"""End-to-end tracer bullet — proves all pipeline agents work together.
 
-Sprint 2: Scout now performs real HTTP / LLM calls. We mock it out here so
-this suite stays fully offline. The real Scout is exercised in
+Scout performs real HTTP calls in production. We mock it here so this suite
+stays fully offline. The real adapters are exercised in
 `test_scout_integration.py` (only when `pytest -m integration` is passed).
 """
 

@@ -15,6 +15,8 @@ import os
 import shutil
 import subprocess
 import tempfile
+import zipfile
+from io import BytesIO
 from pathlib import Path
 
 import yaml
@@ -38,6 +40,46 @@ _PROFILE_KEYS = {
     "education",
     "preferences",
 }
+MAX_CV_BYTES = 10 * 1024 * 1024
+MAX_CV_PAGES = 20
+MAX_EXTRACTED_CHARS = 150_000
+MAX_DOCX_UNCOMPRESSED_BYTES = 30 * 1024 * 1024
+ALLOWED_CV_SUFFIXES = {".pdf", ".docx", ".txt", ".md"}
+
+
+def validate_cv_content(data: bytes, suffix: str) -> None:
+    """Validate extension-specific magic and reject oversized/archive-bomb input."""
+    normalized = suffix.casefold()
+    if normalized not in ALLOWED_CV_SUFFIXES:
+        raise ValueError(
+            "Nicht unterstuetzter CV-Dateityp. Erlaubt: "
+            + ", ".join(sorted(ALLOWED_CV_SUFFIXES))
+        )
+    if not data or len(data) > MAX_CV_BYTES:
+        raise ValueError("CV-Datei ist leer oder groesser als 10 MB.")
+    if normalized == ".pdf" and not data.startswith(b"%PDF-"):
+        raise ValueError("Die Datei hat keine gueltige PDF-Signatur.")
+    if normalized == ".docx":
+        if not data.startswith(b"PK\x03\x04"):
+            raise ValueError("Die Datei hat keine gueltige DOCX-Signatur.")
+        try:
+            with zipfile.ZipFile(BytesIO(data)) as archive:
+                names = set(archive.namelist())
+                if "[Content_Types].xml" not in names or "word/document.xml" not in names:
+                    raise ValueError("Das Archiv ist kein gueltiges DOCX-Dokument.")
+                if len(names) > 2000:
+                    raise ValueError("DOCX enthaelt zu viele Dateien.")
+                if sum(item.file_size for item in archive.infolist()) > MAX_DOCX_UNCOMPRESSED_BYTES:
+                    raise ValueError("DOCX ist entpackt zu gross.")
+        except zipfile.BadZipFile as exc:
+            raise ValueError("DOCX-Archiv ist beschaedigt.") from exc
+    if normalized in {".txt", ".md"}:
+        if b"\x00" in data:
+            raise ValueError("Text-CV enthaelt binaere Daten.")
+        try:
+            data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("Text-CV muss UTF-8-kodiert sein.") from exc
 
 
 def extract_cv_text(path: str | Path) -> str:
@@ -47,17 +89,20 @@ def extract_cv_text(path: str | Path) -> str:
         raise FileNotFoundError(f"CV file not found: {cv_path}")
 
     suffix = cv_path.suffix.lower()
+    validate_cv_content(cv_path.read_bytes(), suffix)
     if suffix == ".pdf":
         text = _extract_pdf(cv_path)
     elif suffix == ".docx":
         text = _extract_docx(cv_path)
     else:
-        # .txt, .md, or anything else we treat as UTF-8 text.
+        # The validator restricts this branch to .txt and .md.
         text = cv_path.read_text(encoding="utf-8", errors="replace")
 
     text = text.strip()
     if not text:
         raise ValueError(f"CV file is empty or unreadable: {cv_path}")
+    if len(text) > MAX_EXTRACTED_CHARS:
+        raise ValueError("CV enthaelt zu viel extrahierten Text.")
     log.info("[cv] extracted %d chars from %s", len(text), cv_path.name)
     return text
 
@@ -84,19 +129,20 @@ def _pdf_text_layer(path: Path) -> str:
 
     pages: list[str] = []
     with pdfplumber.open(str(path)) as pdf:
+        if len(pdf.pages) > MAX_CV_PAGES:
+            raise ValueError(f"CV-PDF darf hoechstens {MAX_CV_PAGES} Seiten haben.")
         for page in pdf.pages:
             pages.append(page.extract_text() or "")
     return "\n\n".join(pages)
 
 
 def _ocr_pdf(path: Path) -> str:
-    """OCR a scanned/image PDF: render pages with PyMuPDF, read with Tesseract."""
+    """OCR a scanned/image PDF: render via pdfplumber, read with Tesseract."""
     try:
-        import fitz  # PyMuPDF
+        import pdfplumber
     except ImportError as exc:  # pragma: no cover - environment dependent
         raise RuntimeError(
-            "This looks like a scanned/image PDF. OCR needs PyMuPDF "
-            "(uv pip install pymupdf)."
+            "This looks like a scanned/image PDF. OCR needs pdfplumber."
         ) from exc
 
     tesseract = shutil.which("tesseract")
@@ -114,13 +160,16 @@ def _ocr_pdf(path: Path) -> str:
     langs = _tesseract_langs(env.get("TESSDATA_PREFIX"))
 
     texts: list[str] = []
-    doc = fitz.open(str(path))
-    try:
-        for page in doc:
-            pix = page.get_pixmap(dpi=300)
-            texts.append(_run_tesseract(tesseract, pix.tobytes("png"), langs, env))
-    finally:
-        doc.close()
+    with pdfplumber.open(str(path)) as pdf:
+        if len(pdf.pages) > MAX_CV_PAGES:
+            raise ValueError(f"CV-PDF darf hoechstens {MAX_CV_PAGES} Seiten haben.")
+        for page in pdf.pages:
+            if float(page.width) * float(page.height) > 2_000_000:
+                raise ValueError("CV-PDF enthaelt eine unplausibel grosse Seite.")
+            image = page.to_image(resolution=200).original
+            buffer = BytesIO()
+            image.save(buffer, format="PNG")
+            texts.append(_run_tesseract(tesseract, buffer.getvalue(), langs, env))
     return "\n\n".join(texts).strip()
 
 
@@ -176,7 +225,13 @@ def _extract_docx(path: Path) -> str:
         ) from exc
 
     document = docx.Document(str(path))
-    return "\n".join(paragraph.text for paragraph in document.paragraphs)
+    parts = [paragraph.text for paragraph in document.paragraphs if paragraph.text.strip()]
+    for table in document.tables:
+        for row in table.rows:
+            values = [" ".join(cell.text.split()) for cell in row.cells if cell.text.strip()]
+            if values:
+                parts.append(" | ".join(values))
+    return "\n".join(parts)
 
 
 def load_profile_yaml(path: str | Path) -> UserProfile:

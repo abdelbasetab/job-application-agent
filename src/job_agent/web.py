@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import hmac
 import html
 import json
@@ -42,6 +43,7 @@ from job_agent.tools.email_account import (
     account_from_mapping,
     account_from_settings,
     email_identity_payload,
+    normalize_email_address,
 )
 from job_agent.tools.email_oauth import (
     build_authorization_url,
@@ -72,6 +74,8 @@ _AUTH_ATTEMPTS: dict[str, list[float]] = {}
 _LOGIN_MAX_ATTEMPTS = 12
 _REGISTER_MAX_ATTEMPTS = 30
 _AUTH_RATE_WINDOW = 300.0
+_AUTH_RATE_MAX_KEYS = 5000
+_ACTION_MAX_ATTEMPTS = 60
 MAX_JSON_BODY_BYTES = 12 * 1024 * 1024
 MAX_CV_UPLOAD_BYTES = 8 * 1024 * 1024
 ALLOWED_CV_SUFFIXES = {".pdf", ".docx", ".txt", ".md"}
@@ -83,13 +87,26 @@ ProgressFn = Callable[[str, int], None]
 
 _PROGRESS_LOCK = threading.Lock()
 _PROGRESS: dict[str, dict[str, Any]] = {}
+_PIPELINE_CAPACITY = threading.BoundedSemaphore(4)
+_ACTIVE_PIPELINE_OWNERS: set[int | None] = set()
 _AUTOPILOT_LOCK = threading.Lock()
 _AUTOPILOT_SCHEDULES: dict[int, dict[str, Any]] = {}
+_EMAIL_AUTOPILOT_RUN_LOCK = threading.Lock()
+_ACCOUNT_DELETE_LOCK = threading.Lock()
+_DELETING_USERS: set[int] = set()
+_DELETED_USER_PREFIX = ".deleted-user-"
 
 
 def _user_data_dir(user_id: int) -> Path:
     """Per-user data root. Each account's pipeline data lives here, isolated."""
-    root = (DATA_DIR / "users" / str(int(user_id))).resolve(strict=False)
+    uid = int(user_id)
+    with _ACCOUNT_DELETE_LOCK:
+        if uid in _DELETING_USERS:
+            raise RuntimeError("Account deletion is currently in progress.")
+    users_root = (DATA_DIR / "users").resolve(strict=False)
+    root = (users_root / str(uid)).resolve(strict=False)
+    if root.parent != users_root:
+        raise RuntimeError("Refusing an invalid or symlinked user data path.")
     root.mkdir(parents=True, exist_ok=True)
     return root
 
@@ -103,6 +120,23 @@ def _preferred_user_db(user_id: int) -> Path:
     return root / "demo_job_agent.db"
 
 
+def _purge_deleted_user_dirs() -> None:
+    """Retry cleanup of isolated account tombstones left by an OS error."""
+    users_root = (DATA_DIR / "users").resolve(strict=False)
+    if not users_root.is_dir():
+        return
+    for candidate in users_root.iterdir():
+        if not candidate.name.startswith(_DELETED_USER_PREFIX) or candidate.is_symlink():
+            continue
+        resolved = candidate.resolve(strict=False)
+        if resolved.parent != users_root or not resolved.is_dir():
+            continue
+        try:
+            shutil.rmtree(resolved)
+        except OSError as exc:
+            log.error("[web] deleted-account cleanup still pending for %s: %s", candidate.name, exc)
+
+
 class _UserSession:
     """In-memory working state scoped to a single authenticated user."""
 
@@ -111,7 +145,7 @@ class _UserSession:
         self.last_db_path = default_db
         self.last_error: str | None = None
         self.current_profile: UserProfile | None = None
-        self.current_profile_source = "demo"
+        self.current_profile_source = ""
         self.uploaded_cv_path: str | None = None
         self.uploaded_cv_name: str | None = None
 
@@ -136,7 +170,31 @@ class WebState:
         with self.lock:
             sess = self._users.get(uid)
             if sess is None:
+                if len(self._users) >= 500:
+                    self._users.pop(next(iter(self._users)))
                 sess = _UserSession(str(_preferred_user_db(uid)))
+                store = Store(sess.last_db_path)
+                try:
+                    active = store.get_active_profile()
+                    if active is not None:
+                        sess.current_profile, sess.current_profile_source, _ = active
+                    jobs = store.all_jobs()
+                    matches = store.all_matches()
+                    statuses = store.all_status()
+                    applications = [
+                        app
+                        for status in statuses
+                        if (app := store.get_application(status.job_id)) is not None
+                    ]
+                    if jobs or matches or applications or statuses:
+                        sess.last_result = PipelineResult(
+                            jobs=jobs,
+                            matches=matches,
+                            applications=applications,
+                            statuses=statuses,
+                        )
+                finally:
+                    store.close()
                 self._users[uid] = sess
             return sess
 
@@ -163,7 +221,9 @@ def _load_email_account(
         if refresh_oauth and _should_refresh_oauth(account):
             account = _refresh_and_store_oauth_account(user, account)
         return account, "local"
-    return account_from_settings(), "env"
+    # Never expose process-wide mailbox credentials to a newly registered web
+    # account. Environment credentials are reserved for the CLI/local session.
+    return EmailAccount(email_address=user["email"], provider="unconfigured"), "unconfigured"
 
 
 def _should_refresh_oauth(account: EmailAccount) -> bool:
@@ -206,6 +266,8 @@ def run_web_server(host: str = "127.0.0.1", port: int = 7860, open_browser: bool
     """Start the local web UI server."""
     for warning in settings.startup_warnings():
         log.warning("[web] config: %s", warning)
+    _purge_deleted_user_dirs()
+    _bootstrap_web_user()
     state = WebState()
     handler_cls = _build_handler(state)
     server = ThreadingHTTPServer((host, port), handler_cls)
@@ -223,7 +285,18 @@ def run_web_server(host: str = "127.0.0.1", port: int = 7860, open_browser: bool
 
 def _build_handler(state: WebState) -> type[BaseHTTPRequestHandler]:
     class JobAgentHandler(BaseHTTPRequestHandler):
-        server_version = "JobAgentWeb/0.1"
+        server_version = "JobAgentWeb/1.0"
+
+        def end_headers(self) -> None:
+            self.send_header("Content-Security-Policy", _content_security_policy())
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+            self.send_header("X-Frame-Options", "DENY")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+            if settings.web_secure_cookies:
+                self.send_header("Strict-Transport-Security", "max-age=31536000")
+            super().end_headers()
 
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
@@ -249,9 +322,23 @@ def _build_handler(state: WebState) -> type[BaseHTTPRequestHandler]:
                         cookies = [_csrf_cookie(csrf)]
                 self._send_json(payload, cookies=cookies)
                 return
+            if parsed.path == "/api/auth/config":
+                self._send_json(
+                    {
+                        "ok": True,
+                        "registration_enabled": settings.web_allow_registration,
+                    }
+                )
+                return
             user = self._current_user()
             if parsed.path.startswith("/api/") and user is None:
                 self._send_json({"ok": False, "error": "Not authenticated"}, status=HTTPStatus.UNAUTHORIZED)
+                return
+            if user is not None and _account_deletion_in_progress(user["id"]):
+                self._send_json(
+                    {"ok": False, "error": "Account deletion is in progress."},
+                    status=HTTPStatus.CONFLICT,
+                )
                 return
             if parsed.path == "/api/config":
                 self._send_json(_config_payload(state, user))
@@ -378,11 +465,60 @@ def _build_handler(state: WebState) -> type[BaseHTTPRequestHandler]:
             if user is None:
                 self._send_json({"ok": False, "error": "Not authenticated"}, status=HTTPStatus.UNAUTHORIZED)
                 return
+            if _account_deletion_in_progress(user["id"]):
+                self._send_json(
+                    {"ok": False, "error": "Account deletion is in progress."},
+                    status=HTTPStatus.CONFLICT,
+                )
+                return
             if not self._csrf_ok():
                 self._send_json(
                     {"ok": False, "error": "CSRF-Prüfung fehlgeschlagen."},
                     status=HTTPStatus.FORBIDDEN,
                 )
+                return
+            try:
+                per_path_limit = (
+                    6
+                    if parsed.path
+                    in {"/api/run-pipeline-async", "/api/build-profile"}
+                    else _ACTION_MAX_ATTEMPTS
+                )
+                _rate_limit(
+                    f"action:{user['id']}:{parsed.path}",
+                    per_path_limit,
+                )
+            except ValueError as exc:
+                self._send_json(
+                    {"ok": False, "error": str(exc)},
+                    status=HTTPStatus.TOO_MANY_REQUESTS,
+                )
+                return
+            if parsed.path == "/api/auth/change-password":
+                try:
+                    response = _change_password_from_payload(self._read_json(), user)
+                    self._send_json(
+                        response,
+                        cookies=[_clear_session_cookie(), _clear_csrf_cookie()],
+                    )
+                except Exception as exc:
+                    self._send_json(
+                        {"ok": False, "error": str(exc)},
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                return
+            if parsed.path == "/api/auth/delete-account":
+                try:
+                    response = _delete_account_from_payload(self._read_json(), state, user)
+                    self._send_json(
+                        response,
+                        cookies=[_clear_session_cookie(), _clear_csrf_cookie()],
+                    )
+                except Exception as exc:
+                    self._send_json(
+                        {"ok": False, "error": str(exc)},
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
                 return
             if parsed.path == "/api/extract-cv":
                 try:
@@ -667,31 +803,27 @@ def _build_handler(state: WebState) -> type[BaseHTTPRequestHandler]:
                     return
                 self._send_json(response)
                 return
-            if parsed.path != "/api/run-pipeline":
-                self._send_error(HTTPStatus.NOT_FOUND, "Not found")
-                return
-            try:
-                payload = self._read_json()
-                response = _run_pipeline_from_payload(payload, state, user=user)
-            except Exception as exc:
-                log.exception("[web] pipeline request failed")
-                state.session(user).last_error = str(exc)
-                self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
-                return
-            self._send_json(response)
+            self._send_error(HTTPStatus.NOT_FOUND, "Not found")
 
         def log_message(self, format: str, *args: Any) -> None:
             log.info("[web] " + format, *args)
 
         def _read_json(self) -> dict[str, Any]:
+            if self.headers.get("Transfer-Encoding"):
+                raise ValueError("Transfer-Encoding is not supported")
             try:
                 length = int(self.headers.get("Content-Length", "0"))
             except ValueError:
                 raise ValueError("Invalid Content-Length header") from None
+            if length < 0:
+                raise ValueError("Invalid Content-Length header")
             if length > MAX_JSON_BODY_BYTES:
                 raise ValueError(
                     f"Request body too large. Maximum is {MAX_JSON_BODY_BYTES // (1024 * 1024)} MB."
                 )
+            content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+            if length and content_type != "application/json":
+                raise ValueError("Content-Type must be application/json")
             raw = self.rfile.read(length).decode("utf-8") if length else "{}"
             data = json.loads(raw)
             if not isinstance(data, dict):
@@ -799,6 +931,11 @@ def _csrf_token_valid(cookie_header: str, header_token: str | None) -> bool:
     return hmac.compare_digest(cookie_token, header_token)
 
 
+def _account_deletion_in_progress(user_id: int) -> bool:
+    with _ACCOUNT_DELETE_LOCK:
+        return int(user_id) in _DELETING_USERS
+
+
 def _auth_store() -> AuthStore:
     """Open an AuthStore against the configured auth DB.
 
@@ -808,10 +945,44 @@ def _auth_store() -> AuthStore:
     return AuthStore(AUTH_DB_PATH)
 
 
+def _bootstrap_web_user() -> None:
+    """Create the first deployment account only from explicit environment data."""
+    store = _auth_store()
+    try:
+        if store.user_count() > 0:
+            return
+        if settings.web_bootstrap_email and settings.web_bootstrap_password:
+            store.create_user(settings.web_bootstrap_email, settings.web_bootstrap_password)
+            log.info("[web] initial account created for %s", settings.web_bootstrap_email)
+            return
+        if not settings.web_allow_registration:
+            raise RuntimeError(
+                "No web user exists. Set WEB_BOOTSTRAP_EMAIL and WEB_BOOTSTRAP_PASSWORD "
+                "for the first start, or explicitly enable WEB_ALLOW_REGISTRATION."
+            )
+    finally:
+        store.close()
+
+
+def _content_security_policy() -> str:
+    return (
+        "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; "
+        "form-action 'self'; img-src 'self' data:; font-src 'self'; "
+        "style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'"
+    )
+
+
 def _rate_limit(key: str, max_attempts: int) -> None:
     """Sliding-window throttle; raises a German ValueError when exceeded."""
     now = time.monotonic()
     with _AUTH_RATE_LOCK:
+        if len(_AUTH_ATTEMPTS) >= _AUTH_RATE_MAX_KEYS and key not in _AUTH_ATTEMPTS:
+            for stale_key in list(_AUTH_ATTEMPTS):
+                timestamps = _AUTH_ATTEMPTS[stale_key]
+                if not timestamps or now - timestamps[-1] >= _AUTH_RATE_WINDOW:
+                    _AUTH_ATTEMPTS.pop(stale_key, None)
+            while len(_AUTH_ATTEMPTS) >= _AUTH_RATE_MAX_KEYS:
+                _AUTH_ATTEMPTS.pop(next(iter(_AUTH_ATTEMPTS)))
         recent = [t for t in _AUTH_ATTEMPTS.get(key, []) if now - t < _AUTH_RATE_WINDOW]
         if len(recent) >= max_attempts:
             _AUTH_ATTEMPTS[key] = recent
@@ -821,6 +992,8 @@ def _rate_limit(key: str, max_attempts: int) -> None:
 
 
 def _register_from_payload(payload: dict[str, Any], client_ip: str = "local") -> dict[str, Any]:
+    if not settings.web_allow_registration:
+        raise ValueError("Registrierung ist auf diesem Server deaktiviert.")
     email = str(payload.get("email") or "")
     password = str(payload.get("password") or "")
     _rate_limit(f"register:{client_ip}", _REGISTER_MAX_ATTEMPTS)
@@ -836,7 +1009,8 @@ def _register_from_payload(payload: dict[str, Any], client_ip: str = "local") ->
 def _login_from_payload(payload: dict[str, Any], client_ip: str = "local") -> dict[str, Any]:
     email = str(payload.get("email") or "")
     password = str(payload.get("password") or "")
-    _rate_limit(f"login:{client_ip}:{email.strip().lower()}", _LOGIN_MAX_ATTEMPTS)
+    rate_email = email.strip().lower()[:254]
+    _rate_limit(f"login:{client_ip}:{rate_email}", _LOGIN_MAX_ATTEMPTS)
     store = _auth_store()
     try:
         user = store.authenticate(email, password)
@@ -855,6 +1029,100 @@ def _logout_from_cookie(cookie_header: str) -> None:
         store.delete_session(token)
     finally:
         store.close()
+
+
+def _change_password_from_payload(payload: dict[str, Any], user: AuthUser) -> dict[str, Any]:
+    current = str(payload.get("current_password") or "")
+    new = str(payload.get("new_password") or "")
+    store = _auth_store()
+    try:
+        store.change_password(user["id"], current, new)
+    finally:
+        store.close()
+    return {"ok": True, "message": "Passwort geaendert. Bitte erneut anmelden."}
+
+
+def _delete_account_from_payload(
+    payload: dict[str, Any], state: WebState, user: AuthUser
+) -> dict[str, Any]:
+    if str(payload.get("confirm") or "") != "DELETE":
+        raise ValueError("Kontoloeschung muss mit DELETE bestaetigt werden.")
+    password = str(payload.get("password") or "")
+    store = _auth_store()
+    try:
+        if store.authenticate(user["email"], password) is None:
+            raise ValueError("Das Passwort ist falsch.")
+    finally:
+        store.close()
+    uid = int(user["id"])
+    users_root = (DATA_DIR / "users").resolve(strict=False)
+    data_root = (users_root / str(uid)).resolve(strict=False)
+    if data_root.parent != users_root:
+        raise RuntimeError("Refusing to remove an invalid user data path.")
+    with _ACCOUNT_DELETE_LOCK:
+        with _PROGRESS_LOCK:
+            if uid in _ACTIVE_PIPELINE_OWNERS:
+                raise ValueError("Bitte warten, bis die laufende Pipeline beendet ist.")
+        if uid in _DELETING_USERS:
+            raise ValueError("Die Kontoloeschung laeuft bereits.")
+        _DELETING_USERS.add(uid)
+
+    tombstone: Path | None = None
+    cleanup_pending = False
+    try:
+        if not _stop_email_autopilot_schedule(uid):
+            raise ValueError("Bitte warten, bis der laufende E-Mail-Autopilot beendet ist.")
+        if data_root.exists():
+            tombstone = users_root / f"{_DELETED_USER_PREFIX}{uid}-{uuid.uuid4().hex}"
+            data_root.replace(tombstone)
+        store = _auth_store()
+        try:
+            store.delete_user(uid, password)
+        except Exception:
+            if tombstone is not None and tombstone.exists() and not data_root.exists():
+                tombstone.replace(data_root)
+            raise
+        finally:
+            store.close()
+        if tombstone is not None:
+            try:
+                shutil.rmtree(tombstone)
+            except OSError as exc:
+                cleanup_pending = True
+                log.error("[web] deferred cleanup for deleted user %d: %s", uid, exc)
+        _clear_deleted_user_memory(uid, user["email"], state)
+    finally:
+        with _ACCOUNT_DELETE_LOCK:
+            _DELETING_USERS.discard(uid)
+    return {
+        "ok": True,
+        "message": (
+            "Konto geloescht; isolierte Restdaten werden beim naechsten Serverstart erneut bereinigt."
+            if cleanup_pending
+            else "Konto und zugehoerige lokale Daten wurden dauerhaft geloescht."
+        ),
+        "recoverable": False,
+        "cleanup_pending": cleanup_pending,
+    }
+
+
+def _clear_deleted_user_memory(uid: int, email: str, state: WebState) -> None:
+    with state.lock:
+        state._users.pop(uid, None)
+    with _PROGRESS_LOCK:
+        for job_id in [
+            key for key, entry in _PROGRESS.items() if entry.get("owner") == uid
+        ]:
+            _PROGRESS.pop(job_id, None)
+    with _AUTH_RATE_LOCK:
+        marker = f"action:{uid}:"
+        login_marker = f":{email.casefold()}"
+        for key in [
+            key
+            for key in _AUTH_ATTEMPTS
+            if key.startswith(marker) or key.endswith(login_marker)
+        ]:
+            _AUTH_ATTEMPTS.pop(key, None)
 
 
 def _auth_me_from_cookie(cookie_header: str) -> dict[str, Any]:
@@ -925,7 +1193,7 @@ def _extract_cv_from_payload(
     user: AuthUser | None = None,
 ) -> dict[str, Any]:
     """Decode an uploaded CV file (base64), extract its text, and return it."""
-    from job_agent.utils.cv import extract_cv_text
+    from job_agent.utils.cv import extract_cv_text, validate_cv_content
 
     filename = str(payload.get("filename") or "cv.txt")
     content_b64 = str(payload.get("content_base64") or "")
@@ -943,6 +1211,7 @@ def _extract_cv_from_payload(
     if suffix not in ALLOWED_CV_SUFFIXES:
         allowed = ", ".join(sorted(ALLOWED_CV_SUFFIXES))
         raise ValueError(f"Unsupported CV file type '{suffix}'. Allowed: {allowed}.")
+    validate_cv_content(raw, suffix)
 
     fd, tmp_path = tempfile.mkstemp(suffix=suffix)
     try:
@@ -989,21 +1258,27 @@ def _save_uploaded_cv(
 
 def _uploaded_cv_path(state: WebState, user: AuthUser | None = None) -> Path | None:
     sess = state.session(user)
+    data_root = _user_data_dir(user["id"]) if user else None
+    upload_dir = ((data_root or DATA_DIR) / "uploads").resolve(strict=False)
     with state.lock:
         remembered = sess.uploaded_cv_path
     if remembered:
         path = Path(remembered).resolve(strict=False)
-        if path.is_file() and path.suffix.lower() in ALLOWED_CV_SUFFIXES:
+        if (
+            upload_dir in path.parents
+            and path.is_file()
+            and path.suffix.lower() in ALLOWED_CV_SUFFIXES
+        ):
             return path
 
-    data_root = _user_data_dir(user["id"]) if user else None
-    upload_dir = ((data_root or DATA_DIR) / "uploads").resolve(strict=False)
     if not upload_dir.is_dir():
         return None
     candidates = [
-        path
+        resolved
         for path in upload_dir.glob("lebenslauf_upload.*")
-        if path.is_file() and path.suffix.lower() in ALLOWED_CV_SUFFIXES
+        if upload_dir in (resolved := path.resolve(strict=False)).parents
+        and resolved.is_file()
+        and resolved.suffix.lower() in ALLOWED_CV_SUFFIXES
     ]
     if not candidates:
         return None
@@ -1027,41 +1302,64 @@ def _remember_profile(
     with state.lock:
         sess.current_profile = profile
         sess.current_profile_source = source
+        db_path = sess.last_db_path
+    data_root = _user_data_dir(user["id"]) if user else None
+    store = Store(_resolve_db_path(db_path, data_root))
+    try:
+        store.save_profile(profile, source)
+    finally:
+        store.close()
+
+
+def _require_profile(
+    state: WebState,
+    user: AuthUser | None,
+    store: Store | None = None,
+) -> UserProfile:
+    """Return the user's selected/persisted profile; never substitute demo identity."""
+    sess = state.session(user)
+    with state.lock:
+        profile = sess.current_profile
+        db_path = sess.last_db_path
+    if profile is not None:
+        return profile
+    owns_store = store is None
+    resolved_store = store
+    if resolved_store is None:
+        data_root = _user_data_dir(user["id"]) if user else None
+        resolved_store = Store(_resolve_db_path(db_path, data_root))
+    try:
+        active = resolved_store.get_active_profile()
+    finally:
+        if owns_store:
+            resolved_store.close()
+    if active is None:
+        raise ValueError(
+            "Kein eigenes Profil gespeichert. Bitte zuerst einen Lebenslauf hochladen "
+            "oder bewusst das Demo-Profil waehlen."
+        )
+    profile, source, _fingerprint = active
+    with state.lock:
+        sess.current_profile = profile
+        sess.current_profile_source = source
+    return profile
 
 
 def _build_profile_from_payload(
     payload: dict[str, Any], state: WebState | None = None, user: AuthUser | None = None
 ) -> dict[str, Any]:
-    """Build a structured profile from CV text for on-screen verification.
-
-    With CV text the LLM Profiler extracts a real UserProfile; without text (or
-    when the LLM is unavailable) the demo profile is returned, clearly flagged.
-    """
+    """Build a structured profile from CV text for on-screen verification."""
     cv_text = str(payload.get("cv_text") or "").strip()
-    if cv_text:
-        try:
-            from job_agent.agents.profiler import run_profiler
+    if not cv_text:
+        raise ValueError(
+            "Kein CV-Text vorhanden. Bitte Lebenslauf importieren oder das "
+            "Demo-Profil bewusst über die separate Demo-Schaltfläche wählen."
+        )
+    from job_agent.agents.profiler import run_profiler
 
-            profile = run_profiler(cv_text)
-            _remember_profile(state, user, profile, "cv")
-            return {"ok": True, "source": "cv", "profile": _profile_dump(profile)}
-        except Exception as exc:
-            log.warning("[web] profiler failed, showing demo preview: %s", exc)
-            profile = demo_profile()
-            _remember_profile(state, user, profile, "demo")
-            return {
-                "ok": True,
-                "source": "demo",
-                "warning": (
-                    f"KI-Connect/LLM nicht erreichbar ({exc}). Vorschau mit "
-                    "Demo-Daten - setze LLM_BASE_URL + OPENAI_API_KEY in .env "
-                    "fuer dein echtes Profil."
-                ),
-                "profile": _profile_dump(profile),
-            }
-    profile = demo_profile()
-    _remember_profile(state, user, profile, "demo")
-    return {"ok": True, "source": "demo", "profile": _profile_dump(profile)}
+    profile = run_profiler(cv_text)
+    _remember_profile(state, user, profile, "cv")
+    return {"ok": True, "source": "cv", "profile": _profile_dump(profile)}
 
 
 def _use_demo_profile(state: WebState, user: AuthUser | None = None) -> dict[str, Any]:
@@ -1078,7 +1376,7 @@ def _run_pipeline_from_payload(
 ) -> dict[str, Any]:
     sess = state.session(user)
     data_root = _user_data_dir(user["id"]) if user else None
-    demo = bool(payload.get("demo", True))
+    demo = bool(payload.get("demo", False))
     query = str(payload.get("query") or "Werkstudent KI")
     limit = _bounded_int(payload.get("limit"), default=5, minimum=1, maximum=25)
     threshold = _bounded_float(payload.get("threshold"), default=0.5, minimum=0.0, maximum=1.0)
@@ -1090,10 +1388,6 @@ def _run_pipeline_from_payload(
         str(payload.get("db_path") or (DEFAULT_DEMO_DB if demo else settings.sqlite_path)),
         data_root,
     )
-
-    if reset_db:
-        if db_path.exists():
-            db_path.unlink()
 
     cv_text = str(payload.get("cv_text") or "").strip()
     force_demo_profile = bool(payload.get("force_demo_profile", False))
@@ -1124,11 +1418,23 @@ def _run_pipeline_from_payload(
             profile = current_profile
             profile_source = current_profile_source
             used_cv = profile_source == "cv"
-        else:
+        elif demo and user is None:
             profile = demo_profile()
             profile_source = "demo"
+        elif demo:
+            raise ValueError(
+                "Bitte das Demo-Profil zuerst bewusst ueber die Demo-Schaltflaeche auswaehlen."
+            )
+        else:
+            raise ValueError(
+                "Kein eigenes Profil vorhanden. Bitte zuerst einen Lebenslauf hochladen "
+                "oder ein Profil erstellen."
+            )
     store = Store(db_path)
     try:
+        if reset_db:
+            store.clear_pipeline_results()
+        store.save_profile(profile, profile_source)
         scout_runner = run_demo_scout
         if not demo:
             from job_agent.agents.scout import run_scout
@@ -1144,6 +1450,7 @@ def _run_pipeline_from_payload(
             scout_runner=scout_runner,
             use_llm_agents=use_llm,
             use_chroma=use_chroma,
+            chroma_path=(data_root / "profile_index") if data_root else None,
             progress=progress,
         )
         statuses = store.all_status()
@@ -1180,18 +1487,27 @@ def _start_pipeline_async(
     """Run the pipeline in a background thread, tracking progress by job id."""
     job_id = uuid.uuid4().hex
     owner = int(user["id"]) if user else None
-    with _PROGRESS_LOCK:
-        if len(_PROGRESS) > 40:
-            for old in list(_PROGRESS)[:20]:
-                _PROGRESS.pop(old, None)
-        _PROGRESS[job_id] = {
-            "owner": owner,
-            "stage": "Start",
-            "percent": 0,
-            "done": False,
-            "result": None,
-            "error": None,
-        }
+    with _ACCOUNT_DELETE_LOCK:
+        if owner is not None and owner in _DELETING_USERS:
+            raise ValueError("Account deletion is in progress.")
+        with _PROGRESS_LOCK:
+            if owner in _ACTIVE_PIPELINE_OWNERS:
+                raise ValueError("Fuer dieses Konto laeuft bereits eine Pipeline.")
+            if not _PIPELINE_CAPACITY.acquire(blocking=False):
+                raise ValueError("Der Server verarbeitet bereits die maximale Zahl an Pipelines.")
+            _ACTIVE_PIPELINE_OWNERS.add(owner)
+            if len(_PROGRESS) > 40:
+                completed = [key for key, value in _PROGRESS.items() if value.get("done")]
+                for old in completed[:20]:
+                    _PROGRESS.pop(old, None)
+            _PROGRESS[job_id] = {
+                "owner": owner,
+                "stage": "Start",
+                "percent": 0,
+                "done": False,
+                "result": None,
+                "error": None,
+            }
 
     def worker() -> None:
         def progress(stage: str, percent: int) -> None:
@@ -1207,10 +1523,24 @@ def _start_pipeline_async(
                 _PROGRESS[job_id].update(result=result, done=True, percent=100, stage="Fertig")
         except Exception as exc:
             log.exception("[web] async pipeline failed")
+            sess = state.session(user)
+            with state.lock:
+                sess.last_error = str(exc)
             with _PROGRESS_LOCK:
                 _PROGRESS[job_id].update(error=str(exc), done=True, stage="Fehler")
+        finally:
+            with _PROGRESS_LOCK:
+                _ACTIVE_PIPELINE_OWNERS.discard(owner)
+            _PIPELINE_CAPACITY.release()
 
-    threading.Thread(target=worker, daemon=True).start()
+    try:
+        threading.Thread(target=worker, daemon=True).start()
+    except Exception:
+        with _PROGRESS_LOCK:
+            _ACTIVE_PIPELINE_OWNERS.discard(owner)
+            _PROGRESS.pop(job_id, None)
+        _PIPELINE_CAPACITY.release()
+        raise
     return {"ok": True, "job_id": job_id}
 
 
@@ -1269,7 +1599,7 @@ def _state_payload(state: WebState, user: AuthUser | None = None) -> dict[str, A
                 stored_jobs = preferred_jobs
                 with state.lock:
                     sess.last_db_path = db_path
-    matches = result.matches if result is not None else []
+    matches = result.matches if result is not None else _safe_matches(db_path, data_root)
     jobs_by_id = {job.id: job for job in stored_jobs}
     if result is not None:
         for job in result.jobs:
@@ -1297,12 +1627,12 @@ def _config_payload(
         "llm_provider": settings.llm_provider,
         "llm_model": settings.llm_model,
         "embedding_model": settings.embedding_model,
-        "email_dry_run": settings.email_dry_run,
+        "email_dry_run": account.dry_run,
         "email_demo_recipient": settings.email_demo_recipient or "",
-        "email_ready": settings.email_dry_run or account.smtp_ready,
-        "email_sync_dry_run": settings.email_sync_dry_run,
+        "email_ready": account.dry_run or account.smtp_ready,
+        "email_sync_dry_run": account.sync_dry_run,
         "email_sync_ready": account.imap_ready,
-        "email_auto_follow_up_send": settings.email_auto_follow_up_send,
+        "email_auto_follow_up_send": account.auto_follow_up_send,
         "email_autopilot_interval_minutes": settings.email_autopilot_interval_minutes,
         "email_identity": identity,
         "email_oauth_providers": oauth_provider_status(),
@@ -1355,6 +1685,8 @@ def _save_email_credentials_from_payload(
         account = account_from_mapping(merged, fallback_email=fallback_email)
         if not account.email_address:
             raise ValueError("E-Mail-Adresse ist erforderlich.")
+        if account.smtp_host and not account.use_tls:
+            raise ValueError("SMTP ohne TLS ist aus Sicherheitsgruenden nicht erlaubt.")
         store.save_json("email", account.secret_dict())
     finally:
         store.close()
@@ -1417,14 +1749,16 @@ def _start_email_oauth_from_payload(
     provider = oauth_provider(str(payload.get("provider") or ""))
     redirect_uri = _oauth_redirect_uri(host_header)
     nonce = secrets.token_urlsafe(32)
+    code_verifier = secrets.token_urlsafe(64)
+    code_challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(code_verifier.encode("ascii")).digest()
+    ).rstrip(b"=").decode("ascii")
     sess = state.session(user)
     with state.lock:
         profile = sess.current_profile
-    login_hint = (
-        str(payload.get("email") or "").strip().lower()
-        or (profile.email.strip().lower() if profile else "")
-        or user["email"]
-    )
+    login_hint = normalize_email_address(str(payload.get("email") or "")) or (
+        normalize_email_address(profile.email) if profile else ""
+    ) or user["email"]
     store = _credential_store(user)
     try:
         store.save_json(
@@ -1435,6 +1769,7 @@ def _start_email_oauth_from_payload(
                 "redirect_uri": redirect_uri,
                 "email": login_hint,
                 "created_at": datetime.now().isoformat(),
+                "code_verifier": code_verifier,
             },
         )
     finally:
@@ -1447,6 +1782,7 @@ def _start_email_oauth_from_payload(
             redirect_uri=redirect_uri,
             state=nonce,
             login_hint=login_hint,
+            code_challenge=code_challenge,
         ),
     }
 
@@ -1476,6 +1812,7 @@ def _complete_email_oauth_from_params(
             code=code,
             redirect_uri=str(saved.get("redirect_uri") or ""),
             email_address=str(saved.get("email") or user["email"]),
+            code_verifier=str(saved.get("code_verifier") or ""),
         )
         store.save_json("email", account.secret_dict())
         store.delete("email_oauth_state")
@@ -1485,10 +1822,23 @@ def _complete_email_oauth_from_params(
 
 
 def _oauth_redirect_uri(host_header: str) -> str:
+    del host_header  # Never trust the request Host header for an OAuth callback.
     base = settings.email_oauth_redirect_base
     if not base:
-        host = host_header.strip() or f"{settings.web_host}:{settings.web_port}"
-        base = f"http://{host}"
+        raise ValueError("EMAIL_OAUTH_REDIRECT_BASE muss fuer OAuth fest konfiguriert sein.")
+    parsed = urlparse(base)
+    local_host = parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+        or (parsed.scheme != "https" and not local_host)
+    ):
+        raise ValueError("EMAIL_OAUTH_REDIRECT_BASE ist keine gueltige feste HTTP(S)-Basis-URL.")
     return base.rstrip("/") + "/api/oauth/email/callback"
 
 
@@ -1562,6 +1912,7 @@ def _update_status_from_payload(
 def _send_application_email_from_payload(
     payload: dict[str, Any], state: WebState, user: AuthUser | None = None
 ) -> dict[str, Any]:
+    from job_agent.tools.email_account import normalize_email_address
     from job_agent.tools.email_delivery import send_application_email
 
     sess = state.session(user)
@@ -1592,13 +1943,54 @@ def _send_application_email_from_payload(
         # Prefer the address from the posting; the fixed config recipient is only
         # a last-resort fallback (e.g. for offline demo jobs without an email).
         recipient = recipient or _extract_contact_email(job) or None
-        email_result = send_application_email(
-            job,
-            application,
-            recipient=recipient,
-            attachments=attachments,
-            account=account,
+        if user is not None and not recipient:
+            raise ValueError("Bitte eine Empfaengeradresse angeben oder im Stellenangebot hinterlegen.")
+        if not account.dry_run and payload.get("confirm_real_send") is not True:
+            raise ValueError("Echter Versand muss unmittelbar vor dem Senden bestaetigt werden.")
+        normalized_recipient = normalize_email_address(
+            recipient or (settings.email_demo_recipient if account.dry_run else "") or ""
         )
+        idempotency_key = _email_idempotency_key(
+            "application",
+            job_id,
+            normalized_recipient,
+            application.model_dump_json(),
+            str(payload.get("idempotency_key") or ""),
+        )
+        if not store.reserve_email(
+            idempotency_key,
+            job_id=job_id,
+            event_type="application_email",
+            recipient=normalized_recipient,
+            payload={"attachments": [path.name for path in attachments]},
+        ):
+            previous = store.email_outbox_entry(idempotency_key) or {}
+            raise ValueError(
+                "Diese E-Mail-Anforderung wurde bereits verarbeitet "
+                f"(Status: {previous.get('state', 'unbekannt')})."
+            )
+        try:
+            email_result = send_application_email(
+                job,
+                application,
+                recipient=recipient,
+                attachments=attachments,
+                account=account,
+            )
+        except Exception as exc:
+            store.finish_email(idempotency_key, state="failed", error=str(exc)[:500])
+            store.record_email_audit(
+                "application_email_failed",
+                {"account_source": account_source, "error": str(exc)[:500]},
+                job_id=job_id,
+            )
+            raise
+        store.finish_email(
+            idempotency_key,
+            state="sent" if email_result["sent"] else "dry_run",
+            message_id=str(email_result.get("message_id") or "") or None,
+        )
+        email_result["idempotency_key"] = idempotency_key
         store.record_email_audit(
             "application_email",
             _safe_email_audit_payload(email_result, account_source),
@@ -1626,7 +2018,11 @@ def _send_application_email_from_payload(
             updated_at=datetime.now(),
             notes=notes,
         )
-        store.upsert_status(record)
+        store.upsert_status(
+            record,
+            event_type="application_email_sent" if email_result["sent"] else "application_email_dry_run",
+            event_payload={"recipient": email_result["recipient"], "idempotency_key": idempotency_key},
+        )
         statuses = store.all_status()
         applications = [
             _application_payload(app, statuses)
@@ -1721,12 +2117,9 @@ def _follow_ups_payload(
         maximum=60,
     )
     db_path = _resolve_db_path(params.get("db_path", [sess.last_db_path])[0], data_root)
-    with state.lock:
-        profile = sess.current_profile
-    candidate = profile.name if profile else demo_profile().name
-
     store = Store(db_path)
     try:
+        candidate = _require_profile(state, user, store).name
         items = due_follow_ups(store, days=days, candidate_name=candidate)
         jobs = {job.id: job for job in store.all_jobs()}
     finally:
@@ -1783,6 +2176,7 @@ def _send_follow_up_email_from_payload(
 ) -> dict[str, Any]:
     """Send (or dry-run) the follow-up email and log it on the application."""
     from job_agent.agents.tracker import follow_up_email_draft, record_follow_up
+    from job_agent.tools.email_account import normalize_email_address
     from job_agent.tools.email_delivery import send_follow_up_email
 
     sess = state.session(user)
@@ -1804,19 +2198,58 @@ def _send_follow_up_email_from_payload(
         if status is None:
             raise ValueError(f"No tracked application for job '{job_id}'.")
         if not body_md:
-            with state.lock:
-                profile = sess.current_profile
-            candidate = profile.name if profile else demo_profile().name
+            candidate = _require_profile(state, user, store).name
             body_md = follow_up_email_draft(
                 job.title, job.company, status.submitted_at, candidate
             )
         recipient = recipient or _extract_contact_email(job) or None
-        email_result = send_follow_up_email(
-            job,
-            body_md,
-            recipient=recipient,
-            account=account,
+        if user is not None and not recipient:
+            raise ValueError("Bitte eine Empfaengeradresse fuer das Follow-up angeben.")
+        if not account.dry_run and payload.get("confirm_real_send") is not True:
+            raise ValueError("Echter Versand muss unmittelbar vor dem Senden bestaetigt werden.")
+        normalized_recipient = normalize_email_address(
+            recipient or (settings.email_demo_recipient if account.dry_run else "") or ""
         )
+        idempotency_key = _email_idempotency_key(
+            "follow_up",
+            job_id,
+            normalized_recipient,
+            body_md,
+            str(payload.get("idempotency_key") or ""),
+        )
+        if not store.reserve_email(
+            idempotency_key,
+            job_id=job_id,
+            event_type="follow_up_email",
+            recipient=normalized_recipient,
+            payload={},
+        ):
+            previous = store.email_outbox_entry(idempotency_key) or {}
+            raise ValueError(
+                "Dieses Follow-up wurde bereits verarbeitet "
+                f"(Status: {previous.get('state', 'unbekannt')})."
+            )
+        try:
+            email_result = send_follow_up_email(
+                job,
+                body_md,
+                recipient=recipient,
+                account=account,
+            )
+        except Exception as exc:
+            store.finish_email(idempotency_key, state="failed", error=str(exc)[:500])
+            store.record_email_audit(
+                "follow_up_email_failed",
+                {"account_source": account_source, "error": str(exc)[:500]},
+                job_id=job_id,
+            )
+            raise
+        store.finish_email(
+            idempotency_key,
+            state="sent" if email_result["sent"] else "dry_run",
+            message_id=str(email_result.get("message_id") or "") or None,
+        )
+        email_result["idempotency_key"] = idempotency_key
         store.record_email_audit(
             "follow_up_email",
             _safe_email_audit_payload(email_result, account_source),
@@ -1827,7 +2260,13 @@ def _send_follow_up_email_from_payload(
             if email_result["sent"]
             else f"Follow-up-E-Mail (Dry-run) vorbereitet an {email_result['recipient']}."
         )
-        record = record_follow_up(store, job_id, note=event)
+        # A preview is not an interaction with the employer and must not reset
+        # the follow-up cadence.
+        record = (
+            record_follow_up(store, job_id, note=event)
+            if email_result["sent"]
+            else status
+        )
         statuses = store.all_status()
         applications = [
             _application_payload(app, statuses)
@@ -1847,8 +2286,20 @@ def _send_follow_up_email_from_payload(
 def _run_email_autopilot_from_payload(
     payload: dict[str, Any], state: WebState, user: AuthUser | None = None
 ) -> dict[str, Any]:
+    if not _EMAIL_AUTOPILOT_RUN_LOCK.acquire(blocking=False):
+        raise ValueError("Ein E-Mail-Autopilot-Lauf ist bereits aktiv.")
+    try:
+        return _run_email_autopilot_unlocked(payload, state, user)
+    finally:
+        _EMAIL_AUTOPILOT_RUN_LOCK.release()
+
+
+def _run_email_autopilot_unlocked(
+    payload: dict[str, Any], state: WebState, user: AuthUser | None = None
+) -> dict[str, Any]:
     """One safe autonomous mail pass: inbox sync plus due follow-up handling."""
     from job_agent.agents.tracker import FOLLOW_UP_AFTER_DAYS, due_follow_ups, record_follow_up
+    from job_agent.tools.email_account import normalize_email_address
     from job_agent.tools.email_delivery import send_follow_up_email
     from job_agent.tools.email_sync import sync_email_statuses
 
@@ -1863,19 +2314,16 @@ def _run_email_autopilot_from_payload(
         minimum=1,
         maximum=60,
     )
-    with state.lock:
-        profile = sess.current_profile
-    candidate = profile.name if profile else demo_profile().name
-
     actions: list[dict[str, Any]] = []
     store = Store(db_path)
     try:
+        candidate = _require_profile(state, user, store).name
         if account.imap_ready:
             sync_result = sync_email_statuses(store, limit=limit, account=account)
         else:
             sync_result = {
                 "ok": False,
-                "dry_run": settings.email_sync_dry_run,
+                "dry_run": account.sync_dry_run,
                 "updates": [],
                 "error": "IMAP nicht konfiguriert.",
             }
@@ -1898,7 +2346,26 @@ def _run_email_autopilot_from_payload(
                 action["reason"] = "Keine Bewerbungsadresse erkannt."
                 actions.append(action)
                 continue
-            if settings.email_auto_follow_up_send:
+            if account.auto_follow_up_send:
+                idempotency_key = _email_idempotency_key(
+                    "auto_follow_up",
+                    item.job_id,
+                    normalize_email_address(recipient),
+                    item.suggested_email_md,
+                    item.last_activity.isoformat(),
+                )
+                if not store.reserve_email(
+                    idempotency_key,
+                    job_id=item.job_id,
+                    event_type="auto_follow_up_email",
+                    recipient=normalize_email_address(recipient),
+                    payload={"last_activity": item.last_activity.isoformat()},
+                ):
+                    action["mode"] = "duplicate"
+                    action["reason"] = "Dieser Follow-up-Zyklus wurde bereits verarbeitet."
+                    actions.append(action)
+                    continue
+                delivery_finalized = False
                 try:
                     email_result = send_follow_up_email(
                         job,
@@ -1908,6 +2375,12 @@ def _run_email_autopilot_from_payload(
                     )
                     action.update(_safe_email_audit_payload(email_result, account_source))
                     action["mode"] = "sent" if email_result.get("sent") else "dry_run"
+                    store.finish_email(
+                        idempotency_key,
+                        state="sent" if email_result.get("sent") else "dry_run",
+                        message_id=str(email_result.get("message_id") or "") or None,
+                    )
+                    delivery_finalized = True
                     if email_result.get("sent"):
                         record_follow_up(
                             store,
@@ -1915,6 +2388,12 @@ def _run_email_autopilot_from_payload(
                             note=f"Autopilot Follow-up gesendet an {email_result['recipient']}.",
                         )
                 except Exception as exc:
+                    if not delivery_finalized:
+                        store.finish_email(
+                            idempotency_key,
+                            state="failed",
+                            error=str(exc)[:500],
+                        )
                     action["mode"] = "error"
                     action["error"] = str(exc)
             actions.append(action)
@@ -1935,7 +2414,7 @@ def _run_email_autopilot_from_payload(
                     }
                     for action in actions
                 ],
-                "auto_send_enabled": settings.email_auto_follow_up_send,
+                "auto_send_enabled": account.auto_follow_up_send,
             },
         )
         statuses = store.all_status()
@@ -1954,7 +2433,7 @@ def _run_email_autopilot_from_payload(
         "sync": sync_result,
         "actions": actions,
         "applications": applications,
-        "auto_send_enabled": settings.email_auto_follow_up_send,
+        "auto_send_enabled": account.auto_follow_up_send,
     }
 
 
@@ -2036,7 +2515,8 @@ def _start_email_autopilot_schedule(
     limit: int,
     run_now: bool,
 ) -> None:
-    _stop_email_autopilot_schedule(key)
+    if not _stop_email_autopilot_schedule(key):
+        raise ValueError("Der vorherige E-Mail-Autopilot ist noch nicht beendet.")
     stop_event = threading.Event()
     user_copy = dict(user) if user else None
     now = datetime.now()
@@ -2062,13 +2542,22 @@ def _start_email_autopilot_schedule(
     thread.start()
 
 
-def _stop_email_autopilot_schedule(key: int) -> None:
+def _stop_email_autopilot_schedule(key: int) -> bool:
     with _AUTOPILOT_LOCK:
         entry = _AUTOPILOT_SCHEDULES.pop(key, None)
-    if entry is not None:
-        stop = entry.get("stop_event")
-        if isinstance(stop, threading.Event):
-            stop.set()
+    if entry is None:
+        return True
+    stop = entry.get("stop_event")
+    if isinstance(stop, threading.Event):
+        stop.set()
+    thread = entry.get("thread")
+    if (
+        isinstance(thread, threading.Thread)
+        and thread is not threading.current_thread()
+        and thread.is_alive()
+    ):
+        thread.join(timeout=60)
+    return not isinstance(thread, threading.Thread) or not thread.is_alive()
 
 
 def _email_autopilot_schedule_worker(
@@ -2221,11 +2710,6 @@ def _inbox_evaluate_from_payload(
     threshold = _bounded_float(payload.get("threshold"), default=0.5, minimum=0.0, maximum=1.0)
     use_llm = bool(payload.get("llm", False))
 
-    with state.lock:
-        profile = sess.current_profile
-    if profile is None:
-        profile = demo_profile()
-
     posting = posting_from_text(
         title=str(payload.get("title") or ""),
         company=str(payload.get("company") or ""),
@@ -2236,6 +2720,7 @@ def _inbox_evaluate_from_payload(
 
     store = Store(db_path)
     try:
+        profile = _require_profile(state, user, store)
         match, application = evaluate_pasted_job(
             store, profile, posting, threshold=threshold, use_llm=use_llm
         )
@@ -2311,7 +2796,6 @@ def _interview_prep_payload(
     db_path = _resolve_db_path(params.get("db_path", [sess.last_db_path])[0], data_root)
 
     with state.lock:
-        profile = sess.current_profile
         last_result = sess.last_result
         sess.last_db_path = str(db_path)
     state_job = None
@@ -2320,6 +2804,7 @@ def _interview_prep_payload(
 
     store = Store(db_path)
     try:
+        profile = _require_profile(state, user, store)
         job = store.get_job(job_id) or state_job
         if job is not None and state_job is not None:
             store.save_job(job)
@@ -2327,11 +2812,15 @@ def _interview_prep_payload(
         store.close()
     if job is None:
         raise ValueError(f"Job '{job_id}' not found in current search or store.")
-    if profile is None:
-        profile = demo_profile()
     match = None
     if last_result is not None:
         match = next((m for m in last_result.matches if m.job_id == job_id), None)
+    if match is None:
+        match_store = Store(db_path)
+        try:
+            match = match_store.get_match(job_id)
+        finally:
+            match_store.close()
 
     return {"ok": True, "prep": build_interview_prep(job, profile, match=match, use_llm=use_llm)}
 
@@ -2365,15 +2854,22 @@ def _export_report_from_payload(
             store.save_job(job)
         application = store.get_application(job_id)
         status = store.get_status(job_id)
+        status_events = store.status_events(job_id, limit=100)
         liveness = store.get_liveness(job_id)
+        stored_match = store.get_match(job_id)
     finally:
         store.close()
-    match = None
+    match = stored_match
     if last_result is not None:
-        match = next((m for m in last_result.matches if m.job_id == job_id), None)
+        match = next((m for m in last_result.matches if m.job_id == job_id), match)
 
     report_md = evaluation_report_md(
-        job, match=match, application=application, status=status, liveness=liveness
+        job,
+        match=match,
+        application=application,
+        status=status,
+        status_events=status_events,
+        liveness=liveness,
     )
     out_dir = _output_dir(data_root, job_id)
     (out_dir / REPORT_FILENAME).write_text(report_md, encoding="utf-8")
@@ -2397,7 +2893,6 @@ def _generate_draft_from_payload(
     db_path = _resolve_db_path(str(payload.get("db_path") or sess.last_db_path), data_root)
 
     with state.lock:
-        profile = sess.current_profile or demo_profile()
         last_result = sess.last_result
     job = None
     match = None
@@ -2407,12 +2902,17 @@ def _generate_draft_from_payload(
 
     store = Store(db_path)
     try:
+        profile = _require_profile(state, user, store)
         stored_job = store.get_job(job_id)
         job = stored_job or job
         if job is None:
             raise ValueError(f"Job '{job_id}' not found in store.")
         if match is None:
+            match = store.get_match(job_id)
+        if match is None:
             match = run_matcher([job], profile, threshold=0.0, use_llm=False)[0]
+            fingerprint = store.save_profile(profile, "draft")
+            store.save_match(match, fingerprint)
         application = run_writer(
             job=job,
             match=match,
@@ -2516,11 +3016,8 @@ def _application_cv_path(
 
     from job_agent.tools.export import _render_cv
 
-    sess = state.session(user)
-    with state.lock:
-        cv_profile = sess.current_profile
     cv_path = out_dir / "lebenslauf.pdf"
-    _render_cv(cv_path, cv_profile or demo_profile())
+    _render_cv(cv_path, _require_profile(state, user))
     return cv_path
 
 
@@ -2540,6 +3037,8 @@ def _export_application_from_payload(
     try:
         job = store.get_job(job_id)
         application = store.get_application(job_id)
+        profile = _require_profile(state, user, store)
+        stored_match = store.get_match(job_id)
     finally:
         store.close()
     if job is None:
@@ -2548,24 +3047,29 @@ def _export_application_from_payload(
         raise ValueError(f"No drafted application exists for job '{job_id}'.")
 
     with state.lock:
-        profile = sess.current_profile
         last_result = sess.last_result
         sess.last_db_path = str(db_path)
-    if profile is None:
-        profile = demo_profile()
-    match = None
+    match = stored_match
     if last_result is not None:
-        match = next((m for m in last_result.matches if m.job_id == job_id), None)
+        match = next((m for m in last_result.matches if m.job_id == job_id), match)
 
     out_dir = _output_dir(data_root, job_id)
+    uploaded_cv = _uploaded_cv_path(state, user)
     result = export_application(
         job,
         application,
         profile,
         out_dir=out_dir,
         match=match,
-        cv_source_path=_uploaded_cv_path(state, user),
+        cv_source_path=uploaded_cv,
     )
+    if uploaded_cv is None:
+        application.tailored_cv_path = str((out_dir / "lebenslauf.pdf").resolve())
+        store = Store(db_path)
+        try:
+            store.save_application(application)
+        finally:
+            store.close()
     download = f"/api/download?job_id={quote(job_id)}&file={quote(result.zip_name)}"
     return {
         "ok": True,
@@ -2596,6 +3100,20 @@ def _download_path(user: AuthUser | None, job_id: str, filename: str) -> Path:
 def _append_note(existing: str, event: str) -> str:
     merged = f"{existing}\n{event}".strip() if existing else event
     return merged[-1000:]
+
+
+def _email_idempotency_key(
+    event_type: str,
+    job_id: str,
+    recipient: str,
+    content: str,
+    client_nonce: str = "",
+) -> str:
+    """Stable key: double-clicks cannot deliver the same content twice."""
+    material = "\0".join(
+        [event_type, job_id, recipient.casefold(), content, client_nonce[:200]]
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 def _safe_statuses(db_path: str, data_root: Path | None = None) -> list[ApplicationStatus]:
@@ -2631,6 +3149,17 @@ def _safe_jobs(db_path: str, data_root: Path | None = None) -> list[JobPosting]:
         return []
 
 
+def _safe_matches(db_path: str, data_root: Path | None = None) -> list[MatchResult]:
+    try:
+        store = Store(_resolve_db_path(db_path, data_root))
+        try:
+            return store.all_matches()
+        finally:
+            store.close()
+    except Exception:
+        return []
+
+
 def _resolve_db_path(db_path: str, data_root: Path | None = None) -> Path:
     """Resolve a SQLite path, confined to an allowed root.
 
@@ -2652,6 +3181,8 @@ def _resolve_db_path(db_path: str, data_root: Path | None = None) -> Path:
             resolved = (root / raw_path.name).resolve(strict=False)
         else:
             raise ValueError("Database path must stay inside the project data directory.")
+    if resolved != root and root not in resolved.parents:
+        raise ValueError("Database path must stay inside the user's data directory.")
     if resolved.suffix.lower() not in ALLOWED_DB_SUFFIXES:
         raise ValueError("Database path must end with .db, .sqlite, or .sqlite3.")
     resolved.parent.mkdir(parents=True, exist_ok=True)

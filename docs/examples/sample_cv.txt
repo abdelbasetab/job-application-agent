@@ -1,0 +1,23 @@
+Alex Beispiel
+E-Mail: alex.beispiel@example.invalid
+Ort: Essen, Deutschland
+
+Profil
+Informatikstudent mit Schwerpunkt Datenanalyse und verantwortungsvoller
+Softwareentwicklung. Suche eine Werkstudentenstelle im Ruhrgebiet oder remote.
+
+Kenntnisse
+- Python, SQL und Git
+- Datenanalyse mit pandas
+- REST-APIs und automatisierte Tests
+- Grundlagen in Machine Learning und Retrieval-Augmented Generation
+- Deutsch C1, Englisch C1
+
+Erfahrung
+04/2025 bis heute – Studentisches Softwareprojekt, Beispiel-Hochschule
+- Entwicklung einer typisierten Python-Anwendung im Viererteam
+- Aufbau automatisierter Tests und CI-Prüfungen
+- Dokumentation von Architektur- und Datenschutzentscheidungen
+
+Ausbildung
+Seit 10/2023 – B.Sc. Informatik, Beispiel-Hochschule

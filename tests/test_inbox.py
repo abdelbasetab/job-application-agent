@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -78,6 +79,21 @@ def test_inbox_rejects_non_urls_and_bad_status(tmp_path: Path) -> None:
         update_status(path, "unbekannt", "neu")
 
 
+def test_inbox_parallel_writes_are_atomic(tmp_path: Path) -> None:
+    path = inbox_path(tmp_path)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(lambda i: add_item(path, f"https://example.de/jobs/{i}"), range(50)))
+
+    assert len(load_inbox(path)) == 50
+
+
+def test_inbox_bounds_url_and_description(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="URL"):
+        add_item(inbox_path(tmp_path), "https://example.de/" + "x" * 3000)
+    with pytest.raises(ValueError, match="zu lang"):
+        posting_from_text(title="X", description="x" * 100_001)
+
+
 def test_posting_from_text_extracts_requirements_and_salary() -> None:
     posting = posting_from_text(
         title="Werkstudent KI",
@@ -91,6 +107,30 @@ def test_posting_from_text_extracts_requirements_and_salary() -> None:
     assert posting.requirements == ["python", "sql", "git"]
     assert posting.salary_range == (20000, 24000)
     assert str(posting.url) == "https://example.de/jobs/42"
+    assert posting.requirements_raw == _JD_TEXT.strip()
+
+
+@pytest.mark.parametrize(
+    ("url", "expected_source"),
+    [
+        ("https://de.indeed.com/viewjob?jk=123", "indeed"),
+        ("https://www.stepstone.de/stellenangebote/123", "stepstone"),
+        ("https://de.linkedin.com/jobs/view/123", "linkedin"),
+        ("https://www.xing.com/jobs/essen-123", "xing"),
+        ("https://notlinkedin.com/jobs/123", "manual"),
+    ],
+)
+def test_posting_from_text_attributes_user_supplied_portal_url(
+    url: str,
+    expected_source: str,
+) -> None:
+    posting = posting_from_text(
+        title="Werkstudent KI",
+        description=_JD_TEXT,
+        url=url,
+    )
+
+    assert posting.source == expected_source
 
 
 def test_posting_from_text_keyword_fallback_and_short_text() -> None:
@@ -122,7 +162,7 @@ def test_evaluate_pasted_job_runs_single_job_pipeline(tmp_path: Path) -> None:
     )
 
     assert match.job_id == posting.id
-    assert match.score >= 0.8, "voller Skill-Match + Standort muss hoch scoren"
+    assert match.score >= 0.75, "zwei von drei Skills plus Standort muessen gut scoren"
     assert application is not None
     assert store.get_application(posting.id) is not None
     assert store.get_status(posting.id) is not None

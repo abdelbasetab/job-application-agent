@@ -1,8 +1,7 @@
 """Profiler agent — turns a raw CV (Lebenslauf) into a structured UserProfile.
 
-This is the new front of the pipeline for Sprint 3: instead of a baked-in demo
-profile, the candidate's actual CV is read (``utils.cv.extract_cv_text``) and
-handed to the configured LLM, which extracts a validated :class:`UserProfile`.
+The candidate's actual CV is read (``utils.cv.extract_cv_text``) and handed to
+the configured LLM, which extracts a validated :class:`UserProfile`.
 
 It needs an LLM — parsing arbitrary CV prose deterministically is out of scope.
 Users without a provider can supply a YAML profile instead (``--profile``).
@@ -15,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from job_agent.schemas import UserProfile
-from job_agent.utils.cv import extract_cv_text
+from job_agent.utils.cv import MAX_EXTRACTED_CHARS, extract_cv_text
 from job_agent.utils.llm import call_llm
 from job_agent.utils.logging import get_logger
 
@@ -45,6 +44,10 @@ def run_profiler(cv_text: str) -> UserProfile:
     """Extract a structured :class:`UserProfile` from raw CV text via the LLM."""
     if not cv_text.strip():
         raise ValueError("CV text is empty — nothing to profile.")
+    if len(cv_text) > MAX_EXTRACTED_CHARS:
+        raise ValueError(
+            f"CV text exceeds the maximum of {MAX_EXTRACTED_CHARS:,} characters."
+        )
 
     prompt = _PROMPT_PATH.read_text(encoding="utf-8")
     log.info("[profiler] extracting profile from %d chars of CV text", len(cv_text))

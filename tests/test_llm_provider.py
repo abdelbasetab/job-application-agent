@@ -58,6 +58,67 @@ def test_call_llm_requires_base_url_for_kiconnect(monkeypatch):
         llm.call_llm([{"role": "user", "content": "hi"}])
 
 
+def test_call_llm_anthropic_uses_direct_messages_api(monkeypatch):
+    captured: dict = {}
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            pass
+
+        def json(self) -> dict:
+            return {
+                "content": [{"type": "text", "text": "hello"}],
+                "usage": {"input_tokens": 6, "output_tokens": 2},
+            }
+
+    def fake_post(url, **kwargs):
+        captured["url"] = url
+        captured.update(kwargs)
+        return FakeResponse()
+
+    monkeypatch.setattr(llm.settings, "llm_provider", "anthropic")
+    monkeypatch.setattr(llm.settings, "llm_base_url", None)
+    monkeypatch.setattr(llm.settings, "anthropic_api_key", "anthropic-secret")
+    monkeypatch.setattr(llm.settings, "llm_model", "claude-test")
+    monkeypatch.setattr(llm.httpx, "post", fake_post)
+    llm.telemetry.reset()
+
+    out = llm.call_llm(
+        [
+            {"role": "system", "content": "Be concise."},
+            {"role": "user", "content": "Hi"},
+        ]
+    )
+
+    assert out == "hello"
+    assert captured["url"] == "https://api.anthropic.com/v1/messages"
+    assert captured["headers"]["x-api-key"] == "anthropic-secret"
+    assert captured["json"]["system"] == "Be concise."
+    assert captured["json"]["messages"] == [{"role": "user", "content": "Hi"}]
+    [record] = llm.telemetry.snapshot()
+    assert record.prompt_tokens == 6
+    assert record.completion_tokens == 2
+
+
+def test_call_llm_anthropic_requires_key(monkeypatch):
+    monkeypatch.setattr(llm.settings, "llm_provider", "anthropic")
+    monkeypatch.setattr(llm.settings, "anthropic_api_key", None)
+
+    with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
+        llm.call_llm([{"role": "user", "content": "hi"}])
+
+
+def test_call_llm_rejects_remote_plain_http_with_api_key(monkeypatch):
+    monkeypatch.setattr(llm.settings, "llm_provider", "kiconnect")
+    monkeypatch.setattr(llm.settings, "llm_base_url", "http://gateway.example/v1")
+    monkeypatch.setattr(llm.settings, "openai_api_key", "secret-key")
+
+    with pytest.raises(ValueError, match="require HTTPS"):
+        llm.call_llm([{"role": "user", "content": "hi"}])
+
+
 class _Resp:
     """Minimal fake httpx response with a controllable status code."""
 
@@ -179,3 +240,32 @@ def test_telemetry_summary_aggregates(monkeypatch, ollama_env):
     assert summary["failed"] == 0
     assert summary["prompt_tokens"] == 20
     assert summary["completion_tokens"] == 10
+
+
+def test_call_llm_rejects_oversized_prompt_before_network(monkeypatch, ollama_env):
+    def forbidden_post(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("network must not be called")
+
+    monkeypatch.setattr(llm.httpx, "post", forbidden_post)
+    with pytest.raises(ValueError, match="safety limit"):
+        llm.call_llm([{"role": "user", "content": "x" * (llm._MAX_PROMPT_CHARS + 1)}])
+
+
+def test_invalid_gateway_shape_is_recorded_as_failure(monkeypatch, ollama_env):
+    class InvalidResponse:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            pass
+
+        def json(self) -> dict:
+            return {"choices": []}
+
+    monkeypatch.setattr(llm.httpx, "post", lambda *_args, **_kwargs: InvalidResponse())
+
+    with pytest.raises(RuntimeError, match="failed after"):
+        llm.call_llm([{"role": "user", "content": "hi"}])
+
+    [record] = llm.telemetry.snapshot()
+    assert record.ok is False
+    assert "completion choice" in record.error

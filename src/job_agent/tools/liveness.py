@@ -16,9 +16,12 @@ captcha handling.
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Any
 
 from job_agent.schemas import JobPosting, LivenessResult
+from job_agent.utils.config import settings
 from job_agent.utils.logging import get_logger
+from job_agent.utils.network_security import safe_http_get, validate_public_url
 
 log = get_logger(__name__)
 
@@ -59,18 +62,16 @@ FetchFn = Callable[[str, float], FetchResult]
 
 
 def _http_fetch(url: str, timeout: float) -> FetchResult:
-    import httpx
-
-    with httpx.Client(
-        follow_redirects=True,
+    return safe_http_get(
+        url,
         timeout=timeout,
+        max_bytes=40_000,
         headers={
             "User-Agent": _USER_AGENT,
             "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
         },
-    ) as client:
-        response = client.get(url)
-        return response.status_code, str(response.url), response.text[:40000]
+        allow_private=settings.allow_private_network_services,
+    )
 
 
 def check_job_liveness(
@@ -186,12 +187,31 @@ def _playwright_probe(url: str, timeout: float) -> LivenessResult | None:
     except ImportError:
         return None
     try:
+        validate_public_url(url, allow_private=settings.allow_private_network_services)
         with sync_playwright() as runner:
             browser = runner.chromium.launch(headless=True)
             try:
                 page = browser.new_page(user_agent=_USER_AGENT)
+
+                def guard_navigation(route: Any, request: Any) -> None:
+                    # Playwright may follow redirects independently of httpx.
+                    # Validate each main-frame navigation before it reaches the network.
+                    is_navigation = bool(request.is_navigation_request())
+                    frame = request.frame
+                    if is_navigation and frame == page.main_frame:
+                        try:
+                            validate_public_url(
+                                str(request.url),
+                                allow_private=settings.allow_private_network_services,
+                            )
+                        except ValueError:
+                            route.abort()
+                            return
+                    route.continue_()
+
+                page.route("**/*", guard_navigation)
                 page.goto(url, timeout=timeout * 1000, wait_until="domcontentloaded")
-                content = (page.content() or "").lower()
+                content = (page.content() or "")[:200_000].lower()
             finally:
                 browser.close()
     except Exception as exc:

@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from job_agent.agents.matcher import run_matcher
 from job_agent.agents.tracker import run_tracker
 from job_agent.agents.writer import run_writer
-from job_agent.memory.profile_index import ProfileVectorStore
 from job_agent.memory.store import Store
 from job_agent.schemas import (
     ApplicationStatus,
@@ -28,7 +28,7 @@ def run_scout(
     query: str | None = None,
     limit: int = 5,
 ) -> list[JobPosting]:
-    """Lazy live Scout wrapper to avoid importing CrewAI for demo/test paths."""
+    """Lazy live Scout wrapper so demo/test paths stay fully offline."""
     from job_agent.agents.scout import run_scout as live_run_scout
 
     return live_run_scout(profile, query, limit)
@@ -53,6 +53,7 @@ def run_pipeline(
     scout_runner: Callable[[UserProfile, str | None, int], list[JobPosting]] | None = None,
     use_llm_agents: bool | None = None,
     use_chroma: bool | None = None,
+    chroma_path: str | Path | None = None,
     progress: Callable[[str, int], None] | None = None,
 ) -> PipelineResult:
     """Run the full Scout → Matcher → Writer → Tracker chain."""
@@ -64,7 +65,8 @@ def run_pipeline(
     scout = scout_runner or run_scout
     llm_enabled = settings.enable_llm_agents if use_llm_agents is None else use_llm_agents
     chroma_enabled = settings.enable_chroma if use_chroma is None else use_chroma
-    profile_context: list[str] = []
+    profile_fingerprint = store.save_profile(profile, source="pipeline")
+    context_by_job: dict[str, list[str]] = {}
 
     _emit("Scout: Jobs suchen", 10)
     log.info("=== [1/4] Scout ===")
@@ -73,24 +75,29 @@ def run_pipeline(
         store.save_job(job)
 
     if chroma_enabled:
-        index = ProfileVectorStore()
+        from job_agent.memory.profile_index import ProfileVectorStore
+
+        index = ProfileVectorStore(path=chroma_path)
         index.upsert_profile(profile)
-        context_query = query or " ".join(
-            [job.title for job in result.jobs[:3]]
-            + [skill for skill in profile.skills[:5]]
-        )
-        profile_context = index.query(context_query, top_k=3)
-        log.info("[pipeline] loaded %d profile context snippets", len(profile_context))
+        for job in result.jobs:
+            context_query = " ".join(
+                [job.title, job.description[:1000], *job.requirements[:10]]
+            )
+            context_by_job[job.id] = index.query(context_query, top_k=3)
+        log.info("[pipeline] loaded per-job profile context for %d jobs", len(result.jobs))
 
     _emit("Matcher: Bewertung", 45)
     log.info("=== [2/4] Matcher ===")
-    result.matches = run_matcher(
-        result.jobs,
-        profile,
-        threshold=match_threshold,
-        use_llm=llm_enabled,
-        profile_context=profile_context,
-    )
+    for job in result.jobs:
+        matched = run_matcher(
+            [job],
+            profile,
+            threshold=match_threshold,
+            use_llm=llm_enabled,
+            profile_context=context_by_job.get(job.id, []),
+        )[0]
+        result.matches.append(matched)
+        store.save_match(matched, profile_fingerprint)
     by_id = {j.id: j for j in result.jobs}
 
     _emit("Writer: Anschreiben", 70)
@@ -111,7 +118,7 @@ def run_pipeline(
             match=match,
             profile=profile,
             use_llm=llm_enabled,
-            profile_context=profile_context,
+            profile_context=context_by_job.get(job.id, []),
         )
         result.applications.append(app)
 

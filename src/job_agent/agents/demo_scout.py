@@ -1,7 +1,7 @@
 """Deterministic Scout data for offline demos.
 
-The live Scout depends on external APIs and an LLM. This module keeps the
-Sprint review demo stable while preserving the same JobPosting contract.
+The live Scout depends on external APIs. This module keeps the offline demo
+reproducible while preserving the same JobPosting contract.
 """
 
 from __future__ import annotations

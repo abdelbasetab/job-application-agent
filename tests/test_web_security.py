@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from job_agent import web
+from job_agent.memory.auth_store import AuthStore
 from job_agent.web import WebState, _run_pipeline_from_payload
 
 
@@ -27,10 +28,26 @@ def test_pipeline_data_is_isolated_per_user(
     state = WebState()
 
     ra = _run_pipeline_from_payload(
-        {"demo": True, "limit": 1, "draft_all": True, "reset_db": True}, state, user=_user(1)
+        {
+            "demo": True,
+            "force_demo_profile": True,
+            "limit": 1,
+            "draft_all": True,
+            "reset_db": True,
+        },
+        state,
+        user=_user(1),
     )
     rb = _run_pipeline_from_payload(
-        {"demo": True, "limit": 3, "draft_all": True, "reset_db": True}, state, user=_user(2)
+        {
+            "demo": True,
+            "force_demo_profile": True,
+            "limit": 3,
+            "draft_all": True,
+            "reset_db": True,
+        },
+        state,
+        user=_user(2),
     )
 
     a_path = ra["db_path"].replace("\\", "/")
@@ -54,16 +71,42 @@ def test_user_cannot_reach_another_users_db_by_path(
     _use_local_data(monkeypatch, tmp_path)
     state = WebState()
     _run_pipeline_from_payload(
-        {"demo": True, "limit": 1, "draft_all": True, "reset_db": True}, state, user=_user(1)
+        {
+            "demo": True,
+            "force_demo_profile": True,
+            "limit": 1,
+            "draft_all": True,
+            "reset_db": True,
+        },
+        state,
+        user=_user(1),
     )
     rb = _run_pipeline_from_payload(
-        {"demo": True, "limit": 3, "draft_all": True, "reset_db": True}, state, user=_user(2)
+        {
+            "demo": True,
+            "force_demo_profile": True,
+            "limit": 3,
+            "draft_all": True,
+            "reset_db": True,
+        },
+        state,
+        user=_user(2),
     )
 
     # User 1 explicitly points at user 2's DB file; the path is re-based into
     # user 1's own directory, so the read can never return user 2's data.
     leaked = web._load_applications(rb["db_path"], web._user_data_dir(1))
     assert len(leaked) == 1
+
+
+def test_authenticated_pipeline_never_selects_demo_profile_implicitly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _use_local_data(monkeypatch, tmp_path)
+    with pytest.raises(ValueError, match="bewusst"):
+        _run_pipeline_from_payload(
+            {"demo": True, "limit": 1}, WebState(), user=_user(9)
+        )
 
 
 def test_resolve_db_path_confines_to_user_dir(
@@ -91,6 +134,7 @@ def test_resolve_db_path_without_root_rejects_outside(
 
 def test_login_is_rate_limited(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(web, "AUTH_DB_PATH", tmp_path / "auth.db")
+    monkeypatch.setattr(web.settings, "web_allow_registration", True)
     web._register_from_payload({"email": "rl@example.com", "password": "password-123"}, "9.9.9.9")
 
     throttled = 0
@@ -126,3 +170,58 @@ def test_secure_cookie_flag_follows_setting(monkeypatch: pytest.MonkeyPatch) -> 
     assert "Secure" in web._session_cookie("tok")
     monkeypatch.setattr(web.settings, "web_secure_cookies", False)
     assert "Secure" not in web._session_cookie("tok")
+
+
+def test_account_delete_removes_auth_data_and_memory_atomically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _use_local_data(monkeypatch, tmp_path)
+    monkeypatch.setattr(web, "AUTH_DB_PATH", tmp_path / "data" / "auth.db")
+    auth = AuthStore(web.AUTH_DB_PATH)
+    user = auth.create_user("delete@example.com", "password-123")
+    auth.close()
+    state = WebState()
+    user_root = web._user_data_dir(user["id"])
+    (user_root / "personal.txt").write_text("private", encoding="utf-8")
+    state.session(user)
+
+    result = web._delete_account_from_payload(
+        {"confirm": "DELETE", "password": "password-123"}, state, user
+    )
+
+    assert result["ok"] is True
+    assert result["cleanup_pending"] is False
+    assert not user_root.exists()
+    reopened = AuthStore(web.AUTH_DB_PATH)
+    try:
+        assert reopened.authenticate("delete@example.com", "password-123") is None
+    finally:
+        reopened.close()
+    assert user["id"] not in state._users
+    assert not web._account_deletion_in_progress(user["id"])
+
+
+def test_account_delete_refuses_while_pipeline_is_active(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _use_local_data(monkeypatch, tmp_path)
+    monkeypatch.setattr(web, "AUTH_DB_PATH", tmp_path / "data" / "auth.db")
+    auth = AuthStore(web.AUTH_DB_PATH)
+    user = auth.create_user("busy@example.com", "password-123")
+    auth.close()
+    with web._PROGRESS_LOCK:
+        web._ACTIVE_PIPELINE_OWNERS.add(user["id"])
+    try:
+        with pytest.raises(ValueError, match="Pipeline"):
+            web._delete_account_from_payload(
+                {"confirm": "DELETE", "password": "password-123"}, WebState(), user
+            )
+    finally:
+        with web._PROGRESS_LOCK:
+            web._ACTIVE_PIPELINE_OWNERS.discard(user["id"])
+
+    reopened = AuthStore(web.AUTH_DB_PATH)
+    try:
+        assert reopened.authenticate("busy@example.com", "password-123") is not None
+    finally:
+        reopened.close()

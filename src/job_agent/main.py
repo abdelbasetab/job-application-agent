@@ -27,8 +27,14 @@ console = Console()
 log = get_logger(__name__)
 
 
-def _resolve_profile(cv: str | None, profile_path: str | None) -> UserProfile:
-    """Pick the candidate profile: CV (LLM) > YAML > baked-in demo profile."""
+def _resolve_profile(
+    cv: str | None,
+    profile_path: str | None,
+    *,
+    allow_demo: bool = False,
+    db_path: str | None = None,
+) -> UserProfile:
+    """Pick an explicit, persisted, or consciously selected demo profile."""
     if cv:
         from job_agent.agents.profiler import profile_from_cv_file
 
@@ -39,13 +45,26 @@ def _resolve_profile(cv: str | None, profile_path: str | None) -> UserProfile:
 
         log.info("[cli] loading profile YAML: %s", profile_path)
         return load_profile_yaml(profile_path)
-    return demo_profile()
+    if db_path and Path(db_path).is_file():
+        store = Store(db_path)
+        try:
+            active = store.get_active_profile()
+        finally:
+            store.close()
+        if active is not None:
+            log.info("[cli] reusing persisted active profile from %s", db_path)
+            return active[0]
+    if allow_demo:
+        return demo_profile()
+    raise typer.BadParameter(
+        "Kein Profil vorhanden. --cv oder --profile angeben, oder --demo bewusst verwenden."
+    )
 
 
 def _direct_scout_runner(
     profile: UserProfile, query: str | None, limit: int
 ) -> list[JobPosting]:
-    """Live Scout without CrewAI — calls the boards directly (no LLM tool-calling)."""
+    """Live Scout that calls the boards directly without generative source data."""
     from job_agent.tools.job_search import search_all
 
     hint = query or " ".join(profile.skills[:3])
@@ -84,12 +103,13 @@ def run_pipeline_cmd(
     llm_agents: bool = typer.Option(
         False,
         "--llm-agents",
-        help="Use Sprint-3 LLM matcher and writer with deterministic fallback.",
+        help="Use the LLM matcher and writer with deterministic fallback.",
     ),
     chroma: bool = typer.Option(
         False,
+        "--profile-memory",
         "--chroma",
-        help="Index the profile in ChromaDB and pass retrieved context to agents.",
+        help="Index the profile locally and pass retrieved context to agents.",
     ),
     cv: str | None = typer.Option(
         None,
@@ -104,42 +124,48 @@ def run_pipeline_cmd(
     direct: bool = typer.Option(
         False,
         "--direct",
-        help="Live Scout without the CrewAI agent: query job boards directly "
-        "(use when your gateway can't do tool-calling).",
+        help="Compatibility flag: the live Scout always queries job boards directly.",
     ),
 ) -> None:
     """Run the Scout -> Matcher -> Writer -> Tracker pipeline end-to-end."""
-    profile = _resolve_profile(cv, profile_path)
     selected_db_path = db_path or ("./data/demo_job_agent.db" if demo else settings.sqlite_path)
     if reset_demo_db and not demo:
         raise typer.BadParameter("--reset-demo-db can only be used together with --demo")
-    if reset_demo_db:
-        demo_db = Path(selected_db_path)
-        if demo_db.exists():
-            demo_db.unlink()
+    profile = _resolve_profile(
+        cv,
+        profile_path,
+        allow_demo=demo,
+        db_path=selected_db_path,
+    )
 
     Path(selected_db_path).parent.mkdir(parents=True, exist_ok=True)
     store = Store(selected_db_path)
+    try:
+        if reset_demo_db:
+            store.clear_pipeline_results()
 
-    scout_runner: Callable[[UserProfile, str | None, int], list[JobPosting]] = run_demo_scout
-    if not demo:
-        if direct:
-            scout_runner = _direct_scout_runner
-        else:
-            from job_agent.agents.scout import run_scout
+        scout_runner: Callable[[UserProfile, str | None, int], list[JobPosting]] = run_demo_scout
+        if not demo:
+            if direct:
+                scout_runner = _direct_scout_runner
+            else:
+                from job_agent.agents.scout import run_scout
 
-            scout_runner = run_scout
+                scout_runner = run_scout
 
-    result = run_pipeline(
-        profile=profile,
-        store=store,
-        query=query,
-        match_threshold=threshold,
-        job_limit=limit,
-        scout_runner=scout_runner,
-        use_llm_agents=llm_agents,
-        use_chroma=chroma,
-    )
+        result = run_pipeline(
+            profile=profile,
+            store=store,
+            query=query,
+            match_threshold=threshold,
+            job_limit=limit,
+            scout_runner=scout_runner,
+            use_llm_agents=llm_agents,
+            use_chroma=chroma,
+        )
+        statuses = {s.job_id: s for s in store.all_status()}
+    finally:
+        store.close()
 
     table = Table(title="Pipeline summary", show_lines=True)
     table.add_column("Job")
@@ -147,7 +173,6 @@ def run_pipeline_cmd(
     table.add_column("Score", justify="right")
     table.add_column("Status")
     by_id = {j.id: j for j in result.jobs}
-    statuses = {s.job_id: s for s in store.all_status()}
 
     for match in result.matches:
         job = by_id[match.job_id]
@@ -161,9 +186,6 @@ def run_pipeline_cmd(
 
     console.print(table)
     console.print(f"\n[bold green]OK[/bold green] State written to [cyan]{selected_db_path}[/cyan]")
-
-    store.close()
-
 
 @app.command("show-applications")
 def show_applications_cmd(
@@ -286,6 +308,7 @@ def eval_cmd(
     ),
     chroma: bool = typer.Option(
         False,
+        "--profile-memory",
         "--chroma",
         help="RAG-Ablation: LLM-Matcher zusätzlich MIT Profil-Kontext messen (nur mit --llm).",
     ),
@@ -513,7 +536,7 @@ def evaluate_jd_cmd(
     llm: bool = typer.Option(False, "--llm", help="LLM-Matcher/-Writer verwenden."),
     demo: bool = typer.Option(False, "--demo", help="In die Demo-Datenbank schreiben."),
     db_path: str | None = typer.Option(None, "--db-path", help="SQLite-Pfad überschreiben."),
-    cv: str | None = typer.Option(None, "--cv", help="CV für das Profil (sonst Demo-Profil)."),
+    cv: str | None = typer.Option(None, "--cv", help="CV für das Profil."),
     profile_path: str | None = typer.Option(None, "--profile", help="Profil-YAML (offline)."),
 ) -> None:
     """Eine eingefügte Stellenanzeige sofort bewerten (Ein-Job-Auto-Pipeline)."""
@@ -523,8 +546,13 @@ def evaluate_jd_cmd(
     posting = posting_from_text(
         title=title, company=company, location=location, description=text, url=url
     )
-    profile = _resolve_profile(cv, profile_path)
     selected_db_path = db_path or ("./data/demo_job_agent.db" if demo else settings.sqlite_path)
+    profile = _resolve_profile(
+        cv,
+        profile_path,
+        allow_demo=demo,
+        db_path=selected_db_path,
+    )
     Path(selected_db_path).parent.mkdir(parents=True, exist_ok=True)
     store = Store(selected_db_path)
     try:
@@ -624,7 +652,7 @@ def interview_prep_cmd(
     llm: bool = typer.Option(False, "--llm", help="Zusätzlich anzeigenspezifische LLM-Fragen."),
     demo: bool = typer.Option(False, "--demo", help="Offline-Demo-Datenbank verwenden."),
     db_path: str | None = typer.Option(None, "--db-path", help="SQLite-Pfad überschreiben."),
-    cv: str | None = typer.Option(None, "--cv", help="CV für das Profil (sonst Demo-Profil)."),
+    cv: str | None = typer.Option(None, "--cv", help="CV für das Profil."),
     profile_path: str | None = typer.Option(None, "--profile", help="Profil-YAML (offline)."),
     out: str | None = typer.Option(None, "--out", help="Leitfaden als Markdown-Datei speichern."),
 ) -> None:
@@ -640,7 +668,12 @@ def interview_prep_cmd(
     if job is None:
         raise typer.BadParameter(f"Job '{job_id}' nicht in {selected_db_path} gefunden.")
 
-    profile = _resolve_profile(cv, profile_path)
+    profile = _resolve_profile(
+        cv,
+        profile_path,
+        allow_demo=demo,
+        db_path=selected_db_path,
+    )
     guide = build_interview_prep(job, profile, use_llm=llm)
     markdown = interview_prep_md(guide)
     if out:
@@ -649,55 +682,6 @@ def interview_prep_cmd(
         out_file.write_text(markdown, encoding="utf-8")
         console.print(f"[bold green]Gespeichert →[/bold green] [cyan]{out}[/cyan]")
     console.print(markdown)
-
-
-@app.command("import-browser")
-def import_browser_cmd(
-    site: str = typer.Option(..., "--site", help="Login-gated board: indeed | stepstone | xing."),
-    db_path: str | None = typer.Option(None, "--db-path", help="SQLite store to import into."),
-    demo: bool = typer.Option(False, "--demo", help="Import into the offline demo DB."),
-    limit: int = typer.Option(25, "--limit", help="Max postings to take from the visible page."),
-) -> None:
-    """Assisted browser import — you log in and search, the visible results are imported.
-
-    Opens a real browser; no automated login, no captcha bypass, no crawling,
-    no auto-apply. Login-gated boards (Indeed/StepStone/XING) live here, not in
-    the core Scout.
-    """
-    from job_agent.tools.browser_import import SITES, run_assisted_import
-
-    if site not in SITES:
-        raise typer.BadParameter(f"--site must be one of: {', '.join(SITES)}")
-
-    selected_db_path = db_path or ("./data/demo_job_agent.db" if demo else settings.sqlite_path)
-    Path(selected_db_path).parent.mkdir(parents=True, exist_ok=True)
-    store = Store(selected_db_path)
-    try:
-        postings = run_assisted_import(site, limit=limit)
-        for job in postings:
-            store.save_job(job)
-    finally:
-        store.close()
-
-    if not postings:
-        console.print(
-            "[yellow]Keine Jobs erkannt.[/yellow] Die Ergebnisliste war evtl. nicht sichtbar, "
-            "oder die Seitenstruktur weicht von den Selektoren ab. Tipp: erst die Suche im "
-            "Browser ausführen, dann ENTER drücken."
-        )
-        return
-
-    table = Table(title=f"Importiert von {SITES[site].label}", show_lines=False)
-    table.add_column("Titel")
-    table.add_column("Unternehmen")
-    table.add_column("Ort")
-    for job in postings:
-        table.add_row(job.title[:50], job.company[:30], job.location[:24])
-    console.print(table)
-    console.print(
-        f"\n[bold green]{len(postings)} Jobs importiert[/bold green] → "
-        f"[cyan]{selected_db_path}[/cyan]. In der Web-UI sichtbar (gleiche DB)."
-    )
 
 
 if __name__ == "__main__":

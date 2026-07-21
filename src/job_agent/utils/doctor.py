@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import importlib.util
 import shutil
+import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 from job_agent.utils.config import settings
 
@@ -60,6 +62,9 @@ def run_doctor() -> list[Check]:
     checks.append(_check_pdf_export())
     checks.append(_check_playwright())
     checks.append(_check_web_assets())
+    checks.append(_check_web_auth())
+    checks.append(_check_network_policy())
+    checks.append(_check_lockfiles())
     checks.append(_check_env_file())
     return checks
 
@@ -106,13 +111,36 @@ def _check_sqlite() -> Check:
 
 
 def _check_llm() -> Check:
+    from job_agent.utils.llm import validate_llm_base_url
+
     provider = settings.llm_provider.lower()
+    if provider not in {"ollama", "openai", "kiconnect", "anthropic", "groq"}:
+        return Check(
+            "LLM-Konfiguration",
+            "fail",
+            f"Unbekannter Provider: {settings.llm_provider}",
+            fix="LLM_PROVIDER auf ollama, openai, kiconnect, anthropic oder groq setzen.",
+        )
+    if settings.llm_base_url:
+        try:
+            validate_llm_base_url(
+                settings.llm_base_url,
+                provider,
+                settings.llm_api_key,
+            )
+        except ValueError as exc:
+            return Check(
+                "LLM-Konfiguration",
+                "fail",
+                str(exc),
+                fix="Remote LLM-Endpunkte per HTTPS anbinden; lokales HTTP nur bewusst verwenden.",
+            )
     if provider == "ollama":
         return Check("LLM-Konfiguration", "ok", "Provider=ollama (kein API-Key nötig).")
     if not settings.llm_api_key:
         return Check(
             "LLM-Konfiguration",
-            "warn",
+            "fail" if settings.enable_llm_agents else "warn",
             f"Provider={settings.llm_provider}, aber kein API-Key gesetzt.",
             fix="OPENAI_API_KEY (openai/kiconnect), ANTHROPIC_API_KEY oder GROQ_API_KEY in .env setzen.",
         )
@@ -133,11 +161,25 @@ def _check_llm() -> Check:
 def _check_smtp() -> Check:
     if settings.email_dry_run:
         return Check("E-Mail-Versand (SMTP)", "ok", "EMAIL_DRY_RUN=true — Versand wird nur simuliert.")
-    if not settings.email_smtp_host:
+    if not settings.email_use_tls:
         return Check(
             "E-Mail-Versand (SMTP)",
-            "warn",
-            "EMAIL_DRY_RUN=false, aber EMAIL_SMTP_HOST fehlt.",
+            "fail",
+            "EMAIL_DRY_RUN=false, aber SMTP-TLS ist deaktiviert.",
+            fix="EMAIL_USE_TLS=true setzen; Port 465 nutzt implizites TLS, andere Ports STARTTLS.",
+        )
+    if not all(
+        (
+            settings.email_smtp_host,
+            settings.email_smtp_user,
+            settings.email_smtp_password,
+            settings.email_from,
+        )
+    ):
+        return Check(
+            "E-Mail-Versand (SMTP)",
+            "fail",
+            "EMAIL_DRY_RUN=false, aber SMTP Host/User/Passwort/Absender sind unvollständig.",
             fix="EMAIL_SMTP_HOST/USER/PASSWORD setzen oder EMAIL_DRY_RUN=true lassen.",
         )
     return Check("E-Mail-Versand (SMTP)", "ok", f"SMTP konfiguriert: {settings.email_smtp_host}")
@@ -151,7 +193,7 @@ def _check_imap() -> Check:
         return Check("Inbox-Sync (IMAP)", "ok", f"IMAP konfiguriert: {settings.email_imap_host}")
     return Check(
         "Inbox-Sync (IMAP)",
-        "warn",
+        "fail" if not settings.email_sync_dry_run else "warn",
         "IMAP-Zugangsdaten unvollständig — automatische Status-Updates aus der Inbox deaktiviert.",
         fix="EMAIL_IMAP_HOST/USER/PASSWORD setzen (optionales Feature).",
     )
@@ -170,15 +212,15 @@ def _check_cv_dependencies() -> list[Check]:
                 fix="uv pip install pdfplumber",
             )
         )
-    if _module_available("fitz"):
-        checks.append(Check("Scan-OCR (PyMuPDF)", "ok", "PyMuPDF verfügbar."))
+    if _module_available("pypdfium2"):
+        checks.append(Check("Scan-OCR (PDF-Renderer)", "ok", "pypdfium2 verfügbar."))
     else:
         checks.append(
             Check(
-                "Scan-OCR (PyMuPDF)",
+                "Scan-OCR (PDF-Renderer)",
                 "warn",
-                "PyMuPDF fehlt — gescannte Bild-PDFs können nicht per OCR gelesen werden.",
-                fix="uv pip install pymupdf",
+                "pypdfium2 fehlt — gescannte Bild-PDFs können nicht gerendert werden.",
+                fix="Die gesperrten Projektabhängigkeiten neu installieren (pdfplumber bringt den Renderer mit).",
             )
         )
     if shutil.which("tesseract"):
@@ -228,7 +270,7 @@ def _check_playwright() -> Check:
         "Liveness-Tiefencheck (Playwright)",
         "warn",
         "Playwright fehlt — Liveness nutzt nur den leichten HTTP-Check (ausreichend für die meisten Fälle).",
-        fix="uv pip install playwright && playwright install chromium",
+        fix="uv sync --locked --extra liveness && uv run playwright install chromium",
     )
 
 
@@ -255,4 +297,118 @@ def _check_env_file() -> Check:
         "warn",
         "Keine .env gefunden — es gelten Standardwerte (Offline-Demo funktioniert trotzdem).",
         fix="cp .env.example .env und Werte eintragen.",
+    )
+
+
+def _check_web_auth() -> Check:
+    """Ensure a fresh closed-registration deployment can actually be entered."""
+    if settings.web_allow_registration:
+        return Check(
+            "Web-Registrierung",
+            "warn",
+            "WEB_ALLOW_REGISTRATION=true — jeder erreichbare Besucher kann ein Konto anlegen.",
+            fix="Nach der kontrollierten Einrichtung WEB_ALLOW_REGISTRATION=false setzen.",
+        )
+    if settings.web_bootstrap_email or settings.web_bootstrap_password:
+        if not (settings.web_bootstrap_email and settings.web_bootstrap_password):
+            return Check(
+                "Web-Bootstrap",
+                "fail",
+                "Nur einer der beiden Bootstrap-Werte ist gesetzt.",
+                fix="WEB_BOOTSTRAP_EMAIL und WEB_BOOTSTRAP_PASSWORD gemeinsam setzen oder beide entfernen.",
+            )
+        if len(settings.web_bootstrap_password) < 12:
+            return Check(
+                "Web-Bootstrap",
+                "fail",
+                "Das Bootstrap-Passwort ist kürzer als 12 Zeichen.",
+                fix="Ein langes zufälliges Bootstrap-Passwort über den Secret Manager setzen.",
+            )
+        return Check("Web-Bootstrap", "ok", "Geschlossene Registrierung mit Bootstrap-Konto.")
+
+    from job_agent.web import AUTH_DB_PATH
+
+    if AUTH_DB_PATH.exists():
+        try:
+            conn = sqlite3.connect(f"file:{AUTH_DB_PATH.as_posix()}?mode=ro", uri=True)
+            try:
+                count = int(conn.execute("SELECT COUNT(*) FROM users").fetchone()[0])
+            finally:
+                conn.close()
+            if count:
+                return Check(
+                    "Web-Bootstrap",
+                    "ok",
+                    "Registrierung geschlossen; mindestens ein bestehendes Konto vorhanden.",
+                )
+        except (OSError, sqlite3.Error):
+            pass
+    return Check(
+        "Web-Bootstrap",
+        "fail",
+        "Registrierung ist geschlossen, aber weder Konto noch Bootstrap-Zugang ist erkennbar.",
+        fix="WEB_BOOTSTRAP_EMAIL und WEB_BOOTSTRAP_PASSWORD für den ersten Start sicher setzen.",
+    )
+
+
+def _check_network_policy() -> Check:
+    if settings.allow_private_network_services:
+        return Check(
+            "Netzwerk-Zielschutz",
+            "warn",
+            "Private/Loopback-Dienste sind ausdrücklich erlaubt; SSRF-Schutz ist reduziert.",
+            fix="ALLOW_PRIVATE_NETWORK_SERVICES=false lassen, außer für einen kontrollierten lokalen Dienst.",
+        )
+    oauth_configured = bool(
+        settings.email_oauth_google_client_id or settings.email_oauth_microsoft_client_id
+    )
+    if oauth_configured and not settings.email_oauth_redirect_base:
+        return Check(
+            "OAuth-Redirect",
+            "fail",
+            "OAuth-Client ist gesetzt, aber EMAIL_OAUTH_REDIRECT_BASE fehlt.",
+            fix="Die explizite externe HTTPS-Origin als EMAIL_OAUTH_REDIRECT_BASE setzen.",
+        )
+    if settings.email_oauth_redirect_base:
+        parsed = urlsplit(settings.email_oauth_redirect_base)
+        local = parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+        if parsed.scheme != "https" and not local:
+            return Check(
+                "OAuth-Redirect",
+                "fail",
+                "Die externe OAuth-Basis verwendet kein HTTPS.",
+                fix="EMAIL_OAUTH_REDIRECT_BASE auf die öffentliche HTTPS-Origin setzen.",
+            )
+    if settings.web_host in {"0.0.0.0", "::"} and not settings.web_secure_cookies:
+        return Check(
+            "Web-Cookies",
+            "warn",
+            "Server bindet breit, aber Secure-Cookies sind aus.",
+            fix="Hinter HTTPS WEB_SECURE_COOKIES=true setzen; lokal nur an 127.0.0.1 binden.",
+        )
+    if settings.web_host in {"127.0.0.1", "localhost", "::1"} and settings.web_secure_cookies:
+        return Check(
+            "Web-Cookies",
+            "warn",
+            "Secure-Cookies sind bei lokaler Bindung aktiv und funktionieren über reines HTTP nicht.",
+            fix="Lokal WEB_SECURE_COOKIES=false oder auch lokal HTTPS verwenden.",
+        )
+    return Check("Netzwerk-Zielschutz", "ok", "Private Ziele gesperrt; Cookie/Redirect-Basis plausibel.")
+
+
+def _check_lockfiles() -> Check:
+    from job_agent.utils.config import _REPO_ROOT
+
+    missing = [
+        name
+        for name in ("uv.lock", "requirements-runtime.lock")
+        if not (_REPO_ROOT / name).is_file()
+    ]
+    if not missing:
+        return Check("Dependency-Lockfiles", "ok", "uv.lock und Runtime-Export vorhanden.")
+    return Check(
+        "Dependency-Lockfiles",
+        "warn",
+        "Fehlend: " + ", ".join(missing),
+        fix="uv lock und danach den dokumentierten uv export ausführen.",
     )

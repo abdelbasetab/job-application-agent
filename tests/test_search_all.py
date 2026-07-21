@@ -38,6 +38,36 @@ def test_search_all_respects_limit(monkeypatch):
     assert len(out) == 3
 
 
+def test_search_all_dedups_same_role_across_sources(monkeypatch):
+    monkeypatch.setattr(
+        job_search, "adzuna_search", lambda **kw: [_job("adz-1", "adzuna")]
+    )
+    monkeypatch.setattr(
+        job_search,
+        "ba_jobsuche_search",
+        lambda **kw: [_job("ba-1", "ba-jobsuche")],
+    )
+
+    out = job_search.search_all("python", limit=10)
+
+    assert len(out) == 1
+
+
+def test_adzuna_malformed_json_is_a_safe_empty_result(monkeypatch):
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            pass
+
+        def json(self):  # type: ignore[no-untyped-def]
+            raise ValueError("not json")
+
+    monkeypatch.setattr(job_search.settings, "adzuna_app_id", "id")
+    monkeypatch.setattr(job_search.settings, "adzuna_app_key", "key")
+    monkeypatch.setattr(job_search.httpx, "get", lambda *_args, **_kwargs: FakeResponse())
+
+    assert job_search.adzuna_search("python") == []
+
+
 def test_extra_queries_are_deduped(monkeypatch):
     seen = []
 
@@ -78,7 +108,7 @@ def test_extract_skill_mentions_normalizes_aliases():
     requirements, nice = job_search.extract_skill_mentions(
         "Wir suchen Erfahrung mit PostgreSQL, Git und REST API. Docker ist nice to have."
     )
-    assert requirements == ["sql", "git", "docker", "rest apis"]
+    assert requirements == ["sql", "git", "rest apis"]
     assert nice == ["docker"]
 
 
@@ -95,3 +125,32 @@ def test_adzuna_normalize_hydrates_requirements():
     )
     assert posting is not None
     assert posting.requirements == ["python", "sql", "git"]
+
+
+def test_board_normalizers_drop_malformed_nested_values_without_raising():
+    assert (
+        job_search._adzuna_normalize(
+            {
+                "id": "bad-1",
+                "redirect_url": "https://example.de/bad-1",
+                "title": {"unexpected": "object"},
+                "company": ["not", "a", "mapping"],
+                "location": 42,
+                "description": {"unexpected": "object"},
+                "created": 123,
+            }
+        )
+        is None
+    )
+    assert (
+        job_search._ba_normalize(
+            {
+                "refnr": "bad-2",
+                "titel": ["not", "text"],
+                "arbeitgeber": {"unexpected": "object"},
+                "arbeitsort": {"ort": ["not", "text"]},
+                "externeUrl": 42,
+            }
+        )
+        is None
+    )

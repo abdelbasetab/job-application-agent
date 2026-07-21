@@ -123,6 +123,7 @@ def test_follow_up_email_uses_job_contact_when_recipient_missing(
     store = Store(db_path)
     job = _job()
     try:
+        store.save_profile(web.demo_profile(), source="test")
         store.save_job(job)
         store.save_application(
             GeneratedApplication(job_id=job.id, cover_letter_md="Bewerbung", generated_at=date.today())

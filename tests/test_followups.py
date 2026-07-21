@@ -1,4 +1,4 @@
-"""Offline tests for the follow-up cadence (Tracker Sprint 4)."""
+"""Offline tests for the Tracker follow-up cadence."""
 
 from __future__ import annotations
 

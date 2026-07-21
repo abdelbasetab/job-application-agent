@@ -83,6 +83,15 @@ def test_run_profiler_empty_text_raises():
         profiler.run_profiler("   ")
 
 
+def test_run_profiler_rejects_oversized_pasted_text_before_llm(monkeypatch):
+    def forbidden_call(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("LLM must not be called for oversized input")
+
+    monkeypatch.setattr(profiler, "call_llm", forbidden_call)
+    with pytest.raises(ValueError, match="maximum"):
+        profiler.run_profiler("x" * (cv.MAX_EXTRACTED_CHARS + 1))
+
+
 def test_run_profiler_rejects_non_json(monkeypatch):
     monkeypatch.setattr(profiler, "call_llm", lambda messages, **_kw: "sorry, I cannot help")
     with pytest.raises(ValueError):

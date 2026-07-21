@@ -65,6 +65,16 @@ def test_profile_vector_store_returns_relevant_context(tmp_path: Path, monkeypat
     assert any("RAG" in snippet or "rag" in snippet.lower() for snippet in snippets)
 
 
+def test_profile_vector_store_persists_across_instances(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr("job_agent.memory.profile_index.settings.embedding_model", "")
+    index_path = tmp_path / "profile-index"
+    ProfileVectorStore(path=index_path).upsert_profile(_profile())
+
+    reopened = ProfileVectorStore(path=index_path)
+
+    assert reopened.query("Python RAG", top_k=1)
+
+
 def test_llm_matcher_falls_back_when_llm_unavailable(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     def broken_llm():
         raise RuntimeError("no local model")
@@ -163,13 +173,16 @@ def test_llm_matcher_runs_parallel_and_preserves_order(monkeypatch) -> None:  # 
         payload = _json.loads(messages[1]["content"].split("\n", 1)[1])
         job_id = payload["job"]["id"]
         return _json.dumps(
-            {
-                "job_id": job_id,
-                "score": scores[job_id],
-                "matched_skills": [],
-                "missing_skills": [],
-                "rationale": "stubbed",
-            }
+                {
+                    "job_id": job_id,
+                    "score": scores[job_id],
+                    "matched_skills": ["python", "rag"],
+                    "missing_skills": [],
+                    "rationale": "stubbed",
+                    "recommendation": (
+                        "strong" if scores[job_id] >= 0.8 else "good" if scores[job_id] >= 0.6 else "maybe"
+                    ),
+                }
         )
 
     monkeypatch.setattr("job_agent.agents.matcher.call_llm", fake_llm)
@@ -224,8 +237,8 @@ def test_writer_self_corrects_failed_quality_checks(monkeypatch) -> None:  # typ
     assert "hiermit bewerbe ich mich" not in app.cover_letter_md.lower()
 
 
-def test_writer_keeps_flags_honest_when_revision_does_not_help(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """If the revision is no better, the result still carries failing flags."""
+def test_writer_uses_safe_template_when_revision_does_not_help(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """An unsafe revision is never returned to the user."""
     import json as _json
 
     bad_letter = (
@@ -252,7 +265,8 @@ def test_writer_keeps_flags_honest_when_revision_does_not_help(monkeypatch) -> N
     app = run_writer(_job(), match, _profile(), use_llm=True)
 
     assert calls["n"] == 2
-    assert app.quality_checks["no_forbidden_phrases"] is False
+    assert app.quality_checks["no_forbidden_phrases"] is True
+    assert app.generation_method == "template"
 
 
 def test_template_writer_uses_contact_person_from_job_description() -> None:
@@ -276,3 +290,99 @@ def test_template_writer_uses_contact_person_from_job_description() -> None:
 
     assert "Sehr geehrte Frau Miriam Schneider" in app.cover_letter_md
     assert "die Arbeit mit python, rag" in app.cover_letter_md
+
+
+def test_skill_aliases_use_token_boundaries() -> None:
+    profile = _profile().model_copy(update={"skills": ["machine learning"]})
+    for requirement in ("html", "html5", "xml", "yaml"):
+        job = _job().model_copy(update={"requirements": [requirement]})
+        [match] = run_matcher([job], profile, use_llm=False)
+        assert match.matched_skills == []
+        assert match.score == 0.0
+
+
+def test_missing_requirements_are_capped_below_draft_threshold() -> None:
+    job = _job().model_copy(
+        update={
+            "requirements": [],
+            "requirements_raw": "",
+            "description": "Eine ausfuehrliche Rolle ohne klar benannte technische Muss-Anforderungen. " * 3,
+        }
+    )
+    [match] = run_matcher([job], _profile(), use_llm=False)
+    assert match.score <= 0.49
+    assert match.recommendation in {"maybe", "skip"}
+
+
+def test_language_level_and_location_are_not_substring_matches() -> None:
+    profile = _profile().model_copy(
+        update={
+            "languages": {"de": "A1", "en": "C1"},
+            "preferences": Preferences(locations=["Essen"]),
+        }
+    )
+    job = _job().model_copy(
+        update={
+            "location": "Hessen",
+            "description": "Fuer diese Position sind Deutschkenntnisse auf Niveau C1 erforderlich.",
+        }
+    )
+    [match] = run_matcher([job], profile, use_llm=False)
+    components = {component.key: component for component in match.score_components}
+    assert components["location"].score == 2
+    assert components["language"].score == 2
+    assert "A1 statt C1" in components["language"].evidence
+
+
+def test_excluded_company_and_minimum_salary_are_hard_gates() -> None:
+    excluded = _profile().model_copy(
+        update={"preferences": Preferences(excluded_companies=["Example GmbH"])}
+    )
+    [company_match] = run_matcher([_job()], excluded, use_llm=False)
+    assert company_match.score == 0.0
+    assert company_match.recommendation == "skip"
+
+    salary = _profile().model_copy(
+        update={"preferences": Preferences(min_salary=80_000)}
+    )
+    [salary_match] = run_matcher([_job()], salary, use_llm=False)
+    assert salary_match.score == 0.0
+    assert "Gehaltsobergrenze" in salary_match.score_summary
+
+
+def test_llm_matcher_rejects_wrong_job_id(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import json as _json
+
+    monkeypatch.setattr(
+        "job_agent.agents.matcher.call_llm",
+        lambda *_args, **_kwargs: _json.dumps(
+            {
+                "job_id": "another-job",
+                "score": 1.0,
+                "matched_skills": ["python", "rag"],
+                "missing_skills": [],
+                "rationale": "invalid id",
+                "recommendation": "strong",
+            }
+        ),
+    )
+    [match] = run_matcher([_job()], _profile(), use_llm=True)
+    assert match.job_id == _job().id
+    assert match.rationale.startswith("LLM fallback:")
+
+
+def test_template_writer_never_exposes_matcher_analysis() -> None:
+    match = MatchResult(
+        job_id="job-1",
+        score=0.7,
+        matched_skills=["python"],
+        missing_skills=["docker"],
+        rationale="Gesamtbewertung 0.70. Risiko-Hinweise: Ghost-Job. Fehlend: Docker.",
+    )
+    app = run_writer(_job(), match, _profile(), use_llm=False)
+    lowered = app.cover_letter_md.casefold()
+    assert "gesamtbewertung" not in lowered
+    assert "ghost-job" not in lowered
+    assert "fehlend" not in lowered
+    assert "docker" not in lowered
+    assert all(app.quality_checks.values())

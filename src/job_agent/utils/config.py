@@ -12,7 +12,7 @@ load_dotenv(_REPO_ROOT / ".env", override=False)
 
 
 class Settings:
-    """A flat settings facade — no fancy validation, this is Sprint 1."""
+    """Flat, fail-fast settings facade loaded once when the process starts."""
 
     # LLM provider — one of: "ollama" (default), "openai", "kiconnect",
     # "anthropic", "groq". "openai" and "kiconnect" are OpenAI-compatible and
@@ -29,7 +29,11 @@ class Settings:
         "yes",
         "on",
     }
-    enable_chroma: bool = os.getenv("ENABLE_CHROMA", "false").lower() in {
+    # ENABLE_CHROMA remains a compatibility alias for deployments created
+    # before the embedded database was replaced by the local SQLite index.
+    enable_chroma: bool = os.getenv(
+        "ENABLE_PROFILE_MEMORY", os.getenv("ENABLE_CHROMA", "false")
+    ).lower() in {
         "1",
         "true",
         "yes",
@@ -55,7 +59,12 @@ class Settings:
 
     # Storage
     sqlite_path: str = os.getenv("SQLITE_PATH", "./data/job_agent.db")
-    chroma_path: str = os.getenv("CHROMA_PATH", "./data/chroma_db")
+    profile_index_path: str = (
+        os.getenv("PROFILE_INDEX_PATH")
+        or os.getenv("CHROMA_PATH")
+        or "./data/profile_index"
+    )
+    chroma_path: str = profile_index_path  # backwards-compatible Python API
 
     # Web UI / multi-user server
     web_host: str = os.getenv("WEB_HOST", "127.0.0.1")
@@ -68,8 +77,8 @@ class Settings:
         "yes",
         "on",
     }
-    # Use the optional Playwright browser fallback when the light HTTP liveness
-    # check is inconclusive. Needs `pip install playwright && playwright install`.
+    # Use the optional Playwright fallback when the light HTTP liveness check is
+    # inconclusive. Install with `uv sync --extra liveness`, then Chromium.
     liveness_deep: bool = os.getenv("LIVENESS_DEEP", "false").lower() in {
         "1",
         "true",
@@ -121,6 +130,17 @@ class Settings:
         "yes",
         "on",
     }
+    web_allow_registration: bool = os.getenv("WEB_ALLOW_REGISTRATION", "false").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    web_bootstrap_email: str | None = os.getenv("WEB_BOOTSTRAP_EMAIL") or None
+    web_bootstrap_password: str | None = os.getenv("WEB_BOOTSTRAP_PASSWORD") or None
+    allow_private_network_services: bool = os.getenv(
+        "ALLOW_PRIVATE_NETWORK_SERVICES", "false"
+    ).lower() in {"1", "true", "yes", "on"}
     email_sync_limit: int = int(os.getenv("EMAIL_SYNC_LIMIT", "50"))
     email_auto_follow_up_send: bool = os.getenv("EMAIL_AUTO_FOLLOW_UP_SEND", "false").lower() in {
         "1",

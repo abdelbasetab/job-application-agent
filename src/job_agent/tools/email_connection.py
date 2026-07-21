@@ -10,9 +10,12 @@ from __future__ import annotations
 import base64
 import imaplib
 import smtplib
+import ssl
 from typing import Any, Literal
 
 from job_agent.tools.email_account import EmailAccount
+from job_agent.utils.config import settings
+from job_agent.utils.network_security import validate_public_host
 
 ConnectionKind = Literal["smtp", "imap", "both"]
 
@@ -51,12 +54,36 @@ def test_smtp_connection(account: EmailAccount, *, timeout: float = 15.0) -> dic
         return _missing("smtp", "OAuth access token fehlt.")
     if account.auth_method != "oauth" and not account.smtp_password:
         return _missing("smtp", "SMTP Passwort/App-Passwort fehlt.")
+    if not account.use_tls:
+        return _failure(
+            "smtp",
+            host,
+            account.smtp_port,
+            user,
+            "SMTP ohne TLS ist aus Sicherheitsgruenden nicht erlaubt.",
+        )
 
     try:
-        with smtplib.SMTP(host, account.smtp_port, timeout=timeout) as smtp:
+        validate_public_host(
+            host,
+            account.smtp_port,
+            allow_private=settings.allow_private_network_services,
+        )
+        tls_context = ssl.create_default_context()
+        connection: smtplib.SMTP
+        if account.smtp_port == 465:
+            connection = smtplib.SMTP_SSL(
+                host,
+                account.smtp_port,
+                timeout=timeout,
+                context=tls_context,
+            )
+        else:
+            connection = smtplib.SMTP(host, account.smtp_port, timeout=timeout)
+        with connection as smtp:
             smtp.ehlo()
-            if account.use_tls:
-                smtp.starttls()
+            if account.smtp_port != 465:
+                smtp.starttls(context=tls_context)
                 smtp.ehlo()
             if account.auth_method == "oauth":
                 _smtp_xoauth2(smtp, user, account.access_token)
@@ -71,7 +98,7 @@ def test_smtp_connection(account: EmailAccount, *, timeout: float = 15.0) -> dic
             user,
             _auth_failure_message(account, "SMTP"),
         )
-    except (OSError, smtplib.SMTPException, TimeoutError) as exc:
+    except (OSError, smtplib.SMTPException, TimeoutError, ValueError) as exc:
         return _failure(
             "smtp",
             host,
@@ -103,7 +130,17 @@ def test_imap_connection(account: EmailAccount, *, timeout: float = 15.0) -> dic
         return _missing("imap", "IMAP Passwort/App-Passwort fehlt.")
 
     try:
-        with imaplib.IMAP4_SSL(host, account.imap_port, timeout=timeout) as imap:
+        validate_public_host(
+            host,
+            account.imap_port,
+            allow_private=settings.allow_private_network_services,
+        )
+        with imaplib.IMAP4_SSL(
+            host,
+            account.imap_port,
+            ssl_context=ssl.create_default_context(),
+            timeout=timeout,
+        ) as imap:
             if account.auth_method == "oauth":
                 imap.authenticate("XOAUTH2", lambda _: _imap_xoauth2(user, account.access_token))
             else:
@@ -125,7 +162,7 @@ def test_imap_connection(account: EmailAccount, *, timeout: float = 15.0) -> dic
             user,
             _auth_failure_message(account, "IMAP"),
         )
-    except (OSError, TimeoutError) as exc:
+    except (OSError, TimeoutError, ValueError) as exc:
         return _failure(
             "imap",
             host,

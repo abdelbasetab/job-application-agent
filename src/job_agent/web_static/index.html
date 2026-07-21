@@ -5,13 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Job Application Agent</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%234f46e5'/%3E%3Ctext x='32' y='42' font-family='Arial,sans-serif' font-size='28' font-weight='800' fill='%23fff' text-anchor='middle'%3EJA%3C/text%3E%3C/svg%3E" />
-    <!-- SF Pro on Apple devices via the system stack; Inter as the cross-platform fallback. -->
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      rel="stylesheet"
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
-    />
+    <!-- Privacy-preserving system font stack; no third-party page requests. -->
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
@@ -231,7 +225,7 @@
                 <details class="advanced">
                   <summary>Erweiterte Optionen</summary>
                   <div class="advanced-body">
-                    <label class="check"><input id="resetInput" type="checkbox" /><span>Vorherige Ergebnisse loeschen</span></label>
+                    <label class="check"><input id="resetInput" type="checkbox" /><span>Vorherige Pipeline-Ergebnisse löschen</span></label>
                     <label class="check"><input id="chromaInput" type="checkbox" /><span>Profil-Kontext einbeziehen</span></label>
                     <input id="dbPathInput" type="hidden" value="./data/demo_job_agent.db" />
                   </div>
@@ -300,7 +294,7 @@
                   <div class="track-row">
                     <input id="emailRecipientInput" type="email" list="recipientSuggestionsList" placeholder="E-Mail aus der Anzeige oder manuell eintragen" />
                     <datalist id="recipientSuggestionsList"></datalist>
-                    <label class="check" title="Lebenslauf als PDF anhängen"><input id="attachCvInput" type="checkbox" checked /><span>CV anhängen</span></label>
+                    <label class="check" title="Lebenslauf nur nach bewusster Auswahl anhängen"><input id="attachCvInput" type="checkbox" /><span>CV anhängen</span></label>
                     <button id="sendEmailBtn" class="btn btn-primary btn-sm" type="button">E-Mail senden</button>
                     <button id="syncInboxBtn" class="btn btn-ghost btn-sm" type="button">Inbox prüfen</button>
                   </div>
@@ -312,11 +306,11 @@
             </div>
           </section>
 
-          <!-- ===================== URL-INBOX ===================== -->
+          <!-- ================= PORTAL- & URL-INBOX ================ -->
           <section id="view-inbox" class="view is-hidden">
             <div class="card">
               <div class="card-head">
-                <h2>URL-Inbox</h2>
+                <h2>Portal- &amp; URL-Inbox</h2>
                 <span class="muted-xs">Links jederzeit merken — später gesammelt bewerten</span>
               </div>
               <div class="inbox-add-row">
@@ -325,20 +319,21 @@
                 <button id="addInboxBtn" class="btn btn-primary" type="button">Merken</button>
               </div>
               <div id="inboxBody" class="inbox-list">
-                <div class="empty">Die Inbox ist leer — Link oben einfügen oder eine Anzeige unten direkt bewerten.</div>
+                <div class="empty">Die Inbox ist leer — Portal-Link oben einfügen oder eine Anzeige unten direkt bewerten.</div>
               </div>
             </div>
 
             <div class="card">
               <div class="card-head">
-                <h2>Anzeige einfügen &amp; sofort bewerten</h2>
+                <h2>Portal-Anzeige einfügen &amp; sofort bewerten</h2>
                 <label class="check" title="Semantische Bewertung mit dem konfigurierten LLM">
                   <input id="jdLlmInput" type="checkbox" /><span>LLM verwenden</span>
                 </label>
               </div>
               <p class="hint">
-                Kompletten Anzeigentext einfügen — der Agent baut daraus eine Stelle, bewertet sie
-                mit der Rubrik und entwirft bei ausreichendem Score direkt ein Anschreiben.
+                Für Indeed, StepStone, LinkedIn, XING oder andere Quellen: sichtbaren
+                Anzeigentext selbst einfügen. Der Agent ruft das Portal nicht automatisch ab,
+                bewertet den Text und entwirft bei ausreichendem Score ein Anschreiben.
               </p>
               <div class="jd-form-grid">
                 <label class="field"><span>Jobtitel *</span><input id="jdTitleInput" type="text" placeholder="z. B. Werkstudent KI" /></label>
@@ -440,7 +435,10 @@
                   <label class="field"><span>IMAP User</span><input id="imapUserInput" type="email" placeholder="name@example.com" /></label>
                   <label class="field"><span>IMAP App-Passwort</span><input id="imapPasswordInput" type="password" autocomplete="new-password" placeholder="leer lassen = behalten" /></label>
                   <label class="field field-xs"><span>Ordner</span><input id="imapFolderInput" type="text" value="INBOX" /></label>
-                  <label class="check email-tls"><input id="emailUseTlsInput" type="checkbox" checked /><span>TLS für SMTP</span></label>
+                  <label class="check email-tls"><input id="emailUseTlsInput" type="checkbox" checked disabled /><span>TLS für SMTP (verpflichtend)</span></label>
+                  <label class="check email-tls"><input id="emailDryRunInput" type="checkbox" checked /><span>Versand nur als Dry-run</span></label>
+                  <label class="check email-tls"><input id="emailSyncDryRunInput" type="checkbox" checked /><span>Inbox-Status nur vorschlagen</span></label>
+                  <label class="check email-tls"><input id="emailAutoFollowUpInput" type="checkbox" /><span>Automatischen echten Follow-up-Versand erlauben</span></label>
                 </div>
                 <div class="btn-row">
                   <button id="fillEmailFromProfileBtn" class="btn btn-ghost btn-sm" type="button">Profil-Mail übernehmen</button>
@@ -470,7 +468,7 @@
               <p class="hint">
                 Der Autopilot arbeitet nach dem Zwei-Schritt-Prinzip: Er synchronisiert die Inbox
                 und <strong>bereitet</strong> fällige Nachfass-Mails vor. Echter Versand passiert nur,
-                wenn EMAIL_AUTO_FOLLOW_UP_SEND und EMAIL_DRY_RUN=false ausdrücklich gesetzt sind.
+                wenn dies oben für dieses Konto ausdrücklich erlaubt und der Dry-run deaktiviert wurde.
                 Der Plan lebt im Serverprozess (endet mit Neustart) — eine bewusste Grenze.
               </p>
               <div class="fu-controls">
@@ -483,6 +481,29 @@
               </div>
               <div id="autopilotSchedulePanel" class="email-audit is-hidden"></div>
               <div id="emailAuditPanel" class="email-audit is-hidden"></div>
+            </div>
+
+            <div class="card">
+              <div class="card-head">
+                <h2>Account-Sicherheit</h2>
+                <span class="muted-xs">Sitzungen werden nach Änderungen beendet</span>
+              </div>
+              <div class="email-form-grid">
+                <label class="field"><span>Aktuelles Passwort</span><input id="currentPasswordInput" type="password" autocomplete="current-password" /></label>
+                <label class="field"><span>Neues Passwort</span><input id="newPasswordInput" type="password" autocomplete="new-password" minlength="12" maxlength="256" /></label>
+              </div>
+              <div class="btn-row">
+                <button id="changePasswordBtn" class="btn btn-primary btn-sm" type="button">Passwort ändern</button>
+              </div>
+              <hr />
+              <p class="hint">Account-Löschung entfernt den Login und alle Daten dieses Accounts dauerhaft.</p>
+              <div class="email-form-grid">
+                <label class="field"><span>Passwort zur Bestätigung</span><input id="deletePasswordInput" type="password" autocomplete="current-password" /></label>
+                <label class="field"><span>DELETE eingeben</span><input id="deleteConfirmInput" type="text" autocomplete="off" /></label>
+              </div>
+              <div class="btn-row">
+                <button id="deleteAccountBtn" class="btn btn-ghost btn-sm" type="button">Account und Daten löschen</button>
+              </div>
             </div>
           </section>
         </main>

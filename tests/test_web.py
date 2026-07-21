@@ -11,6 +11,7 @@ from job_agent.web import WebState, _run_pipeline_from_payload
 
 def test_web_auth_register_login_me_logout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(web, "AUTH_DB_PATH", tmp_path / "auth.db")
+    monkeypatch.setattr(web.settings, "web_allow_registration", True)
 
     registered = web._register_from_payload(
         {"email": "demo@example.com", "password": "password-123"}

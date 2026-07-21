@@ -41,6 +41,11 @@ class EmailAccount:
     refresh_token: str = ""
     token_expires_at: str = ""
     token_scope: str = ""
+    # Policies belong to the account. Authenticated web users must never inherit
+    # the operator's global send/sync policy from the process environment.
+    dry_run: bool = True
+    sync_dry_run: bool = True
+    auto_follow_up_send: bool = False
 
     @property
     def sender(self) -> str:
@@ -98,6 +103,9 @@ class EmailAccount:
             "token_expires_at": self.token_expires_at,
             "token_scope": self.token_scope,
             "use_tls": self.use_tls,
+            "dry_run": self.dry_run,
+            "sync_dry_run": self.sync_dry_run,
+            "auto_follow_up_send": self.auto_follow_up_send,
         }
 
     def secret_dict(self) -> dict[str, Any]:
@@ -131,6 +139,9 @@ def account_from_settings() -> EmailAccount:
         imap_folder=settings.email_imap_folder,
         provider="env",
         auth_method="password",
+        dry_run=settings.email_dry_run,
+        sync_dry_run=settings.email_sync_dry_run,
+        auto_follow_up_send=settings.email_auto_follow_up_send,
     )
 
 
@@ -139,8 +150,8 @@ def account_from_mapping(data: dict[str, Any], fallback_email: str = "") -> Emai
     email_address = _clean_email(str(data.get("email_address") or ""), preferred=fallback) or fallback
     smtp_user = _clean_email(str(data.get("smtp_user") or ""), preferred=email_address) or email_address
     imap_user = _clean_email(str(data.get("imap_user") or ""), preferred=smtp_user or email_address) or smtp_user
-    smtp_host = str(data.get("smtp_host") or "").strip()
-    imap_host = str(data.get("imap_host") or "").strip()
+    smtp_host = str(data.get("smtp_host") or "").strip()[:253]
+    imap_host = str(data.get("imap_host") or "").strip()[:253]
     email_from = (
         _clean_email(str(data.get("email_from") or ""), preferred=email_address)
         or email_address
@@ -156,18 +167,21 @@ def account_from_mapping(data: dict[str, Any], fallback_email: str = "") -> Emai
         smtp_user=smtp_user,
         smtp_password=_clean_secret(str(data.get("smtp_password") or ""), host=smtp_host, user=smtp_user),
         email_from=email_from,
-        use_tls=bool(data.get("use_tls", True)),
+        use_tls=_bool(data.get("use_tls"), True),
         imap_host=imap_host,
         imap_port=_int(data.get("imap_port"), 993, 1, 65535),
         imap_user=imap_user,
         imap_password=_clean_secret(str(data.get("imap_password") or ""), host=imap_host, user=imap_user),
-        imap_folder=str(data.get("imap_folder") or "INBOX").strip() or "INBOX",
-        provider=str(data.get("provider") or "custom").strip() or "custom",
+        imap_folder=str(data.get("imap_folder") or "INBOX").strip()[:255] or "INBOX",
+        provider=str(data.get("provider") or "custom").strip()[:50] or "custom",
         auth_method=auth_method,
-        access_token=str(data.get("access_token") or ""),
-        refresh_token=str(data.get("refresh_token") or ""),
-        token_expires_at=str(data.get("token_expires_at") or ""),
-        token_scope=str(data.get("token_scope") or ""),
+        access_token=str(data.get("access_token") or "")[:16_384],
+        refresh_token=str(data.get("refresh_token") or "")[:16_384],
+        token_expires_at=str(data.get("token_expires_at") or "")[:100],
+        token_scope=str(data.get("token_scope") or "")[:4_096],
+        dry_run=_bool(data.get("dry_run"), True),
+        sync_dry_run=_bool(data.get("sync_dry_run"), True),
+        auto_follow_up_send=_bool(data.get("auto_follow_up_send"), False),
     )
 
 
@@ -199,9 +213,9 @@ def email_identity_payload(
         warnings.append("OAuth-Zugriffstoken ist abgelaufen und wird beim naechsten Sync erneuert.")
     if resolved.auth_method == "oauth" and resolved.oauth_expired and not resolved.refresh_token:
         warnings.append("OAuth-Zugriffstoken ist abgelaufen. Bitte Konto neu verbinden.")
-    if not resolved.smtp_ready and not settings.email_dry_run:
+    if not resolved.smtp_ready and not resolved.dry_run:
         warnings.append("Echter Versand ist aktiv, aber SMTP ist nicht vollstaendig.")
-    if not resolved.imap_ready and not settings.email_sync_dry_run:
+    if not resolved.imap_ready and not resolved.sync_dry_run:
         warnings.append("Echter Inbox-Sync ist aktiv, aber IMAP ist nicht vollstaendig.")
     return {
         "profile_email": profile_email,
@@ -212,9 +226,9 @@ def email_identity_payload(
         "imap_user": imap_user,
         "smtp_ready": resolved.smtp_ready,
         "imap_ready": resolved.imap_ready,
-        "email_dry_run": settings.email_dry_run,
-        "email_sync_dry_run": settings.email_sync_dry_run,
-        "auto_follow_up_send": settings.email_auto_follow_up_send,
+        "email_dry_run": resolved.dry_run,
+        "email_sync_dry_run": resolved.sync_dry_run,
+        "auto_follow_up_send": resolved.auto_follow_up_send,
         "account_source": account_source,
         "account": account_from_mapping(resolved.secret_dict(), fallback_email=candidate).safe_dict(),
         "warnings": warnings,
@@ -236,6 +250,11 @@ def _clean_email(value: str, *, preferred: str = "") -> str:
         if candidate:
             return candidate
     return ""
+
+
+def normalize_email_address(value: str) -> str:
+    """Return one validated mailbox address, or an empty string."""
+    return _clean_email(value)
 
 
 def _clean_email_exact(value: str) -> str:
@@ -260,7 +279,7 @@ def _normalize_email_text(value: str) -> str:
 
 
 def _clean_secret(value: str, *, host: str = "", user: str = "") -> str:
-    secret = str(value or "").strip()
+    secret = str(value or "").strip()[:16_384]
     marker = f"{host} {user}".lower()
     if "gmail.com" in marker or "googlemail.com" in marker:
         return "".join(secret.split())
@@ -280,3 +299,15 @@ def _int(value: object, default: int, minimum: int, maximum: int) -> int:
     else:
         parsed = default
     return max(minimum, min(maximum, parsed))
+
+
+def _bool(value: object, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return default

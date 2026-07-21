@@ -70,6 +70,14 @@ def test_report_contains_all_sections() -> None:
             updated_at=datetime(2026, 7, 5, 10, 0),
             notes="E-Mail gesendet an hr@ruhrtech.de.",
         ),
+        status_events=[
+            {
+                "created_at": "2026-07-01T10:30:00",
+                "previous_status": "draft",
+                "new_status": "submitted",
+                "event_type": "manual_update",
+            }
+        ],
         liveness=LivenessResult(
             url="https://example.de/jobs/rep-1",
             status="live",
@@ -87,6 +95,8 @@ def test_report_contains_all_sections() -> None:
     assert "✓ name_correct" in md and "✗ length_ok" in md
     assert "Sehr geehrte Damen und Herren" in md
     assert "E-Mail gesendet an hr@ruhrtech.de." in md
+    assert "### Statusverlauf" in md
+    assert "draft → submitted" in md
     assert "offen (90%)" in md
     assert "20.000 - 24.000 EUR" in md
     assert REPORT_FILENAME.endswith(".md")

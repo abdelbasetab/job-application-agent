@@ -8,6 +8,7 @@ import pytest
 
 from job_agent import web
 from job_agent.schemas import UserProfile
+from job_agent.utils.cv import validate_cv_content
 
 
 def test_extract_cv_from_payload_text():
@@ -43,11 +44,18 @@ def test_extract_cv_rejects_large_upload(monkeypatch):
         web._extract_cv_from_payload({"filename": "cv.txt", "content_base64": raw})
 
 
-def test_build_profile_empty_returns_demo():
-    out = web._build_profile_from_payload({"cv_text": ""})
-    assert out["ok"] is True
-    assert out["source"] == "demo"
-    assert out["profile"]["name"]
+def test_cv_magic_and_cli_suffix_validation() -> None:
+    with pytest.raises(ValueError, match="PDF-Signatur"):
+        validate_cv_content(b"not a pdf", ".pdf")
+    with pytest.raises(ValueError, match="Dateityp"):
+        validate_cv_content(b"plain text", ".exe")
+    with pytest.raises(ValueError, match="binaere"):
+        validate_cv_content(b"text\x00binary", ".txt")
+
+
+def test_build_profile_empty_requires_explicit_demo_choice():
+    with pytest.raises(ValueError, match="Demo-Profil bewusst"):
+        web._build_profile_from_payload({"cv_text": ""})
 
 
 def test_build_profile_from_cv(monkeypatch):
@@ -67,14 +75,14 @@ def test_build_profile_from_cv(monkeypatch):
     assert out["profile"]["skills"] == ["python"]
 
 
-def test_build_profile_falls_back_to_demo_on_llm_error(monkeypatch):
+def test_build_profile_does_not_replace_failed_cv_with_demo(monkeypatch):
     from job_agent.agents import profiler
 
     def boom(text):
         raise RuntimeError("no key")
 
     monkeypatch.setattr(profiler, "run_profiler", boom)
-    out = web._build_profile_from_payload({"cv_text": "Python"})
-    assert out["ok"] is True
-    assert out["source"] == "demo"
-    assert "warning" in out
+    state = web.WebState()
+    with pytest.raises(RuntimeError, match="no key"):
+        web._build_profile_from_payload({"cv_text": "Python"}, state)
+    assert state.session(None).current_profile is None

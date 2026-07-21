@@ -12,6 +12,7 @@ from job_agent.agents.demo_scout import run_demo_scout
 from job_agent.agents.matcher import run_matcher
 from job_agent.agents.writer import run_writer
 from job_agent.demo_profile import demo_profile
+from job_agent.memory.store import Store
 from job_agent.tools.export import _latin1, _safe_slug, export_application
 
 
@@ -71,6 +72,14 @@ def test_web_export_and_download_roundtrip(
     path = web._download_path(None, job_id, out["zip_name"])
     assert path.is_file()
     assert path.read_bytes()[:2] == b"PK"
+    store = Store(resp["db_path"])
+    try:
+        persisted = store.get_application(job_id)
+        assert persisted is not None
+        assert persisted.tailored_cv_path is not None
+        assert Path(persisted.tailored_cv_path).name == "lebenslauf.pdf"
+    finally:
+        store.close()
 
 
 def test_web_export_uses_uploaded_cv_pdf(

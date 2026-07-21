@@ -31,6 +31,7 @@ htmlcov/
 .tox/
 .mypy_cache/
 .ruff_cache/
+.uv-cache/
 tmp_pytest*/
 data_full_reset_backup_*/
 web_server*.log
@@ -45,11 +46,21 @@ data/pytest-tmp/
 # Project secrets and data
 .env
 .env.local
+.env.*
+!.env.example
+!.env.production.example
+.claude/settings.local.json
+*.pem
+*.key
 data/jobs/*.json
 data/applications/*.md
 data/applications/*.pdf
+data/output/
+data/profile/*
 !data/jobs/.gitkeep
 !data/applications/.gitkeep
+!data/profile/.gitkeep
+!data/profile/profile.yaml.example
 
 # Local DBs (incl. WAL side-files) and per-user data
 *.db

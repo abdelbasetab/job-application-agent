@@ -10,6 +10,7 @@ offline, ohne LLM.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from job_agent.schemas import (
     ApplicationStatus,
@@ -36,6 +37,7 @@ def evaluation_report_md(
     match: MatchResult | None = None,
     application: GeneratedApplication | None = None,
     status: ApplicationStatus | None = None,
+    status_events: list[dict[str, Any]] | None = None,
     liveness: LivenessResult | None = None,
 ) -> str:
     """Render one job evaluation as a self-contained German Markdown report."""
@@ -68,6 +70,9 @@ def evaluation_report_md(
         add(f"**Score:** {match.score:.2f} ({match.score:.0%})  ")
         add(f"**Empfehlung:** {recommendation}  ")
         add(f"**Risiko:** {_RISK_LABELS.get(match.risk_level, match.risk_level)}  ")
+        evaluation_method = "LLM" if match.evaluation_method == "llm" else "deterministisch"
+        evaluation_model = f" ({match.evaluation_model})" if match.evaluation_model else ""
+        add(f"**Bewertungsmethode:** {evaluation_method}{evaluation_model}  ")
         if match.score_summary:
             add(f"**Kurzfazit:** {match.score_summary}  ")
         add("")
@@ -115,6 +120,17 @@ def evaluation_report_md(
                     add(f"- {line.strip()}")
         add("")
 
+    if status_events:
+        add("### Statusverlauf")
+        add("")
+        for event in reversed(status_events):
+            timestamp = str(event.get("created_at") or "-").replace("T", " ")[:16]
+            previous = str(event.get("previous_status") or "Start")
+            current = str(event.get("new_status") or "-")
+            event_type = str(event.get("event_type") or "status_update")
+            add(f"- {timestamp}: {previous} → {current} ({event_type})")
+        add("")
+
     if application is not None:
         add("## Anschreiben-Entwurf")
         add("")
@@ -124,6 +140,10 @@ def evaluation_report_md(
         if checks:
             add(f"**Quality-Checks:** {checks}")
             add("")
+        generation_method = "LLM" if application.generation_method == "llm" else "Template"
+        generation_model = f" ({application.generation_model})" if application.generation_model else ""
+        add(f"**Erstellungsmethode:** {generation_method}{generation_model}")
+        add("")
         add("```text")
         add(application.cover_letter_md.strip())
         add("```")
@@ -135,6 +155,15 @@ def evaluation_report_md(
     add(excerpt[:1200] + ("…" if len(excerpt) > 1200 else ""))
     add("")
     add("---")
-    add("_Erstellt vom Job Application Agent — deterministischer Report, keine LLM-Inhalte._")
+    contains_llm = bool(
+        (match is not None and match.evaluation_method == "llm")
+        or (application is not None and application.generation_method == "llm")
+    )
+    disclosure = (
+        "Der Report enthaelt gekennzeichnete LLM-Inhalte; Status und Dateierstellung sind deterministisch."
+        if contains_llm
+        else "Report und enthaltene Auswertung wurden deterministisch erstellt."
+    )
+    add(f"_Erstellt vom Job Application Agent — {disclosure}_")
     add("")
     return "\n".join(lines)

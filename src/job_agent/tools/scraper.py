@@ -16,10 +16,9 @@ import time
 from urllib.parse import urlparse
 from urllib.robotparser import RobotFileParser
 
-import httpx
-
 from job_agent.utils.config import settings
 from job_agent.utils.logging import get_logger
+from job_agent.utils.network_security import safe_http_get, validate_public_url
 
 log = get_logger(__name__)
 
@@ -38,6 +37,7 @@ _WS_RE = re.compile(r"\s+")
 def _robots_allows(url: str) -> bool:
     """Conservative robots.txt check: disallow if we cannot confirm permission."""
     try:
+        validate_public_url(url, allow_private=settings.allow_private_network_services)
         parts = urlparse(url)
         root = f"{parts.scheme}://{parts.netloc}"
     except Exception:
@@ -47,7 +47,16 @@ def _robots_allows(url: str) -> bool:
         parser = RobotFileParser()
         parser.set_url(root + "/robots.txt")
         try:
-            parser.read()
+            status, _final_url, body = safe_http_get(
+                root + "/robots.txt",
+                headers={"User-Agent": _USER_AGENT},
+                timeout=_HTTP_TIMEOUT,
+                max_bytes=256_000,
+                allow_private=settings.allow_private_network_services,
+            )
+            if status >= 400:
+                return False
+            parser.parse(body.splitlines())
         except Exception:
             _robots_cache[root] = parser
             return False
@@ -79,23 +88,27 @@ def scrape_job_text(url: str, max_chars: int = 6000) -> str:
     """Fetch and clean a single job-detail page. Returns "" unless enabled+allowed."""
     if not settings.enable_scraper:
         return ""
-    if not url.startswith("http"):
+    try:
+        validate_public_url(url, allow_private=settings.allow_private_network_services)
+    except ValueError:
         return ""
     if not _robots_allows(url):
         log.info("[scraper] robots.txt disallows or unknown — skipping %s", url)
         return ""
     _rate_limit()
     try:
-        response = httpx.get(
+        status, final_url, body = safe_http_get(
             url,
             headers={"User-Agent": _USER_AGENT},
             timeout=_HTTP_TIMEOUT,
-            follow_redirects=True,
+            max_bytes=max(1, min(1_000_000, max_chars * 8)),
+            allow_private=settings.allow_private_network_services,
         )
-        response.raise_for_status()
-    except httpx.HTTPError as exc:
+        if status >= 400:
+            raise ValueError(f"HTTP {status}")
+    except Exception as exc:
         log.warning("[scraper] fetch failed for %s: %s", url, exc)
         return ""
-    text = html_to_text(response.text)
-    log.info("[scraper] extracted %d chars from %s", len(text), url)
+    text = html_to_text(body)
+    log.info("[scraper] extracted %d chars from %s", len(text), final_url)
     return text[:max_chars]

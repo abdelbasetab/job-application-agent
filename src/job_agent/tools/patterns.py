@@ -6,8 +6,9 @@ Bewerbungen und Firmen-/Quellen-Verteilung. Alles offline, keine LLM-Calls —
 das Ergebnis ist als JSON serialisierbar (CLI-Tabelle und Web-UI nutzen
 dieselbe Struktur).
 
-Grenze (bewusst): Score-Bänder je Ausgang fehlen noch, weil MatchResults
-bislang nicht persistiert werden — siehe Ausblick in ARCHITECTURE.md.
+Persistierte Match-Ergebnisse werden in Score-Bändern den tatsächlichen
+Tracker-Ausgängen gegenübergestellt. Kleine Stichproben werden kenntlich
+gemacht; die Auswertung behauptet keine Kausalität.
 """
 
 from __future__ import annotations
@@ -26,6 +27,12 @@ _SENT_STATES = {"submitted", "interview", "offer", "rejected"}
 # Statuses that count as a company response.
 _RESPONSE_STATES = {"interview", "offer", "rejected"}
 _STALE_AFTER_DAYS = 14
+_SCORE_BANDS: tuple[tuple[int, int, str], ...] = (
+    (0, 49, "0-49"),
+    (50, 69, "50-69"),
+    (70, 84, "70-84"),
+    (85, 100, "85-100"),
+)
 
 
 def analyze_patterns(store: Store, now: datetime | None = None) -> dict[str, Any]:
@@ -69,6 +76,8 @@ def analyze_patterns(store: Store, now: datetime | None = None) -> dict[str, Any
     stale.sort(key=lambda item: item["days_waiting"], reverse=True)
 
     sent_total = len(sent)
+    statuses_by_job = {status.job_id: status for status in statuses}
+    score_outcomes = _score_outcomes(store, statuses_by_job)
     report: dict[str, Any] = {
         "ok": True,
         "total": len(statuses),
@@ -91,6 +100,7 @@ def analyze_patterns(store: Store, now: datetime | None = None) -> dict[str, Any
         "sources": [
             {"source": name, "count": count} for name, count in sources.most_common()
         ],
+        "score_outcomes": score_outcomes,
         "insights": [],
     }
     report["insights"] = _insights(report)
@@ -101,6 +111,39 @@ def analyze_patterns(store: Store, now: datetime | None = None) -> dict[str, Any
         len(responded),
     )
     return report
+
+
+def _score_outcomes(
+    store: Store, statuses_by_job: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Relate persisted scores to outcomes without overstating small samples."""
+    rows: list[dict[str, Any]] = []
+    matches = {match.job_id: match for match in store.all_matches()}
+    for low, high, label in _SCORE_BANDS:
+        band_statuses = []
+        for job_id, match in matches.items():
+            score = max(0, min(100, round(match.score * 100)))
+            status = statuses_by_job.get(job_id)
+            if low <= score <= high and status is not None:
+                band_statuses.append(status)
+        sent = [status for status in band_statuses if status.status in _SENT_STATES]
+        responses = [status for status in sent if status.status in _RESPONSE_STATES]
+        interviews = [status for status in sent if status.status in {"interview", "offer"}]
+        rows.append(
+            {
+                "band": label,
+                "tracked": len(band_statuses),
+                "sent": len(sent),
+                "responses": len(responses),
+                "interviews": len(interviews),
+                "offers": sum(status.status == "offer" for status in sent),
+                "rejections": sum(status.status == "rejected" for status in sent),
+                "response_rate": round(len(responses) / len(sent), 3) if sent else None,
+                "interview_rate": round(len(interviews) / len(sent), 3) if sent else None,
+                "sample_sufficient": len(sent) >= 5,
+            }
+        )
+    return rows
 
 
 def _insights(report: dict[str, Any]) -> list[str]:
@@ -140,5 +183,13 @@ def _insights(report: dict[str, Any]) -> list[str]:
     if top and top[0]["count"] >= 3:
         insights.append(
             f"Häufigste Firma: {top[0]['company']} ({top[0]['count']}x) — Duplikate oder echte Serie?"
+        )
+    score_rows = [row for row in report.get("score_outcomes", []) if row["sent"] >= 5]
+    if score_rows:
+        best = max(score_rows, key=lambda row: row["interview_rate"] or 0.0)
+        insights.append(
+            f"Score-Band {best['band']} hat aktuell die höchste Interviewquote "
+            f"({(best['interview_rate'] or 0.0):.0%}, n={best['sent']}); "
+            "das ist eine Beobachtung, kein Kausalnachweis."
         )
     return insights
