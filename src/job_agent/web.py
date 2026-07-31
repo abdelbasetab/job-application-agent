@@ -2042,6 +2042,9 @@ def _send_application_email_from_payload(
         existing = store.get_status(job_id)
         submitted_at = existing.submitted_at if existing else None
         status = existing.status if existing else "draft"
+        if email_result["sent"] and status == "draft":
+            status = "submitted"
+            submitted_at = submitted_at or datetime.now()
         event = (
             f"Kontrollpaket per E-Mail an dich gesendet ({email_result['recipient']})."
             if email_result["sent"]

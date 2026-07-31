@@ -83,6 +83,51 @@ def test_sync_messages_updates_status_when_not_dry_run(tmp_path: Path) -> None:
     assert "Inbox: interview erkannt" in status.notes
 
 
+def test_sync_messages_matches_hays_interview_reply(tmp_path: Path) -> None:
+    store = Store(tmp_path / "hays.db")
+    job = JobPosting(
+        id="hays-python",
+        source="ba-jobsuche",
+        source_id="13319-887485",
+        url="https://example.com/hays-python",
+        title="Senior Python Backend Developer",
+        company="Hays Professional Solutions GmbH",
+        location="Nuernberg",
+        description="FastAPI Backend role.",
+        requirements=["python", "fastapi"],
+    )
+    store.save_job(job)
+    store.save_application(
+        GeneratedApplication(
+            job_id=job.id,
+            cover_letter_md="Bewerbung",
+            generated_at=date.today(),
+        )
+    )
+    store.upsert_status(
+        ApplicationStatus(job_id=job.id, status="submitted", submitted_at=datetime.now())
+    )
+    message = InboxMessage(
+        uid="99",
+        sender="Lisa Mueller <recruiting@hays.de>",
+        subject="Einladung Senior Python Backend Developer",
+        body=(
+            "Vielen Dank fuer Ihre Bewerbung bei Hays Professional Solutions GmbH. "
+            "Ihre Unterlagen haben uns ueberzeugt. Wir laden Sie herzlich zu einem "
+            "persoenlichen Gespraech ein. Alternativ ist ein MS Teams Interview moeglich."
+        ),
+    )
+
+    result = sync_messages(store, [message], dry_run=False)
+    status = store.get_status(job.id)
+    store.close()
+
+    assert result["matched"] == 1
+    assert result["updates"][0]["stage"] == "interview"
+    assert status is not None
+    assert status.status == "interview"
+
+
 def test_sync_messages_does_not_guess_from_single_active_application(tmp_path: Path) -> None:
     store = Store(tmp_path / "sync-fallback.db")
     job = _job()

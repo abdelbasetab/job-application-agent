@@ -40,6 +40,9 @@ _INTERVIEW_PATTERNS = [
     r"\bvorstellungsgespr(?:ae|ä)ch\b",
     r"\binterview(?:termin|gespr(?:ae|ä)ch)?\b",
     r"\bzu\s+einem\s+(?:persoenlichen\s+|persönlichen\s+)?gespr(?:ae|ä)ch\s+einladen\b",
+    r"\bherzlich\s+zu\s+einem\s+(?:persoenlichen\s+)?gespraech\s+einladen\b",
+    r"\bunterlagen\s+haben\s+uns\s+ueberzeugt\b",
+    r"\bms\s+teams\b",
     r"\bkennenlernen\s+(?:einladen|vereinbaren)\b",
     r"\bvideo\s*call\b",
 ]
@@ -430,7 +433,21 @@ def _contains_phrase(text: str, phrase: str) -> bool:
 
 
 def _normalize_text(value: str) -> str:
-    return " ".join(value.casefold().replace("-", " ").replace("_", " ").split())
+    text = value.casefold()
+    replacements = {
+        "Ã¤": "ae",
+        "Ã¶": "oe",
+        "Ã¼": "ue",
+        "ÃŸ": "ss",
+        "ä": "ae",
+        "ö": "oe",
+        "ü": "ue",
+        "ß": "ss",
+        "\u202f": " ",
+    }
+    for source, target in replacements.items():
+        text = text.replace(source, target)
+    return " ".join(text.replace("-", " ").replace("_", " ").split())
 
 
 def _company_tokens(company: str) -> list[str]:

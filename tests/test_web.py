@@ -396,12 +396,16 @@ def test_send_application_email_can_retry_after_dry_run(
     assert second["ok"] is True
     assert second["email"]["sent"] is True
     assert second["email"]["dry_run"] is False
+    assert second["status"]["status"] == "submitted"
 
     store = Store(db_path)
     try:
         entry = store.email_outbox_entry(second["email"]["idempotency_key"])
         assert entry is not None
         assert entry["state"] == "sent"
+        status = store.get_status(job_id)
+        assert status is not None
+        assert status.status == "submitted"
     finally:
         store.close()
 

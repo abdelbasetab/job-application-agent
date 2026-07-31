@@ -2235,6 +2235,11 @@ async function enableRealEmailSendForCurrentAccount(reviewTarget) {
   return true;
 }
 async function syncInboxStatus() {
+  await loadConfig();
+  if (state.config.email_sync_dry_run !== false) {
+    const enabled = await enableRealInboxSyncForCurrentAccount();
+    if (!enabled) return;
+  }
   setBusy(true);
   try {
     const res = await fetch("/api/sync-email-status", {
@@ -2259,6 +2264,54 @@ async function syncInboxStatus() {
   } finally {
     setBusy(false);
   }
+}
+
+async function enableRealInboxSyncForCurrentAccount() {
+  const identity = state.config.email_identity || {};
+  const account = identity.account || {};
+  if (!account.imap_ready) {
+    showToast("IMAP ist noch nicht vollstaendig konfiguriert. Bitte zuerst in Einstellungen speichern und IMAP testen.");
+    return false;
+  }
+  if (!window.confirm(
+    "Inbox-Sync ist im Vorschlagsmodus. Jetzt fuer dieses Konto echte Statusupdates aktivieren?"
+  )) return false;
+
+  const body = {
+    email_address: account.email_address || identity.candidate_email || "",
+    email_from: account.email_from || identity.sender || "",
+    review_email: account.review_email || state.config.email_review_recipient || "",
+    smtp_host: account.smtp_host || "",
+    smtp_port: account.smtp_port || 587,
+    smtp_user: account.smtp_user || identity.smtp_user || "",
+    smtp_password: "",
+    imap_host: account.imap_host || "",
+    imap_port: account.imap_port || 993,
+    imap_user: account.imap_user || identity.imap_user || "",
+    imap_password: "",
+    imap_folder: account.imap_folder || "INBOX",
+    use_tls: account.use_tls !== false,
+    dry_run: account.dry_run !== false,
+    sync_dry_run: false,
+    auto_follow_up_send: account.auto_follow_up_send === true,
+  };
+  const res = await fetch("/api/email-credentials", {
+    method: "POST",
+    headers: jsonHeaders(),
+    body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  if (!res.ok || !data.ok) {
+    showToast(data.error || "Inbox-Statusupdates konnten nicht aktiviert werden.");
+    return false;
+  }
+  renderEmailIdentity(data.email_identity);
+  await loadConfig();
+  if (state.config.email_sync_dry_run !== false) {
+    showToast("Inbox-Sync ist weiterhin im Vorschlagsmodus. Bitte Einstellungen pruefen.");
+    return false;
+  }
+  return true;
 }
 
 function inboxSyncMessage(sync) {
