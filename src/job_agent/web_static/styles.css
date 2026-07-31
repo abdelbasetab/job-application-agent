@@ -348,6 +348,18 @@ input:focus, textarea:focus, select:focus, .dropzone:focus-visible {
 .segment.is-active { background: var(--accent-soft); color: var(--accent); }
 .btn-run { height: 40px; }
 .controls-toggles { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+
+/* Query suggestions derived from the user's CV */
+.query-suggestions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 14px; }
+.query-suggestions-label { color: var(--muted); font-size: 12.5px; font-weight: 650; margin-right: 2px; }
+.query-chip {
+  padding: 6px 12px; border: 1px solid var(--line); border-radius: 999px;
+  background: var(--surface-2); color: var(--text);
+  font-size: 12.5px; font-weight: 650; cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+.query-chip:hover { border-color: color-mix(in srgb, var(--accent) 34%, var(--line)); background: var(--accent-soft); color: var(--accent); }
+.query-chip.is-active { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
 .advanced summary { cursor: pointer; color: var(--muted); font-weight: 650; font-size: 13px; }
 .advanced .field { margin-top: 10px; max-width: 340px; }
 .active-profile { margin-left: auto; color: var(--muted); font-size: 12px; font-weight: 600; }

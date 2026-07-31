@@ -95,6 +95,7 @@ const els = {
   connectMicrosoftBtn: el("connectMicrosoftBtn"),
   // suche
   queryInput: el("queryInput"),
+  querySuggestions: el("querySuggestions"),
   limitInput: el("limitInput"),
   thresholdInput: el("thresholdInput"),
   thresholdOut: el("thresholdOut"),
@@ -618,7 +619,56 @@ function updateActiveProfile(source) {
     els.profileStatus.className = `banner ${source === "cv" ? "banner-cv" : "banner-demo"}`;
     els.profileStatus.textContent = label;
   }
+  loadSearchSuggestions();
 }
+
+/* ------------------- search suggestions from the CV ------------------ */
+async function loadSearchSuggestions() {
+  if (!els.querySuggestions) return;
+  try {
+    const res = await fetch("/api/search-suggestions");
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.error || "");
+    renderSearchSuggestions(data.suggestions || []);
+  } catch {
+    renderSearchSuggestions([]);
+  }
+}
+
+function renderSearchSuggestions(suggestions) {
+  const box = els.querySuggestions;
+  if (!box) return;
+  box.classList.toggle("is-hidden", suggestions.length === 0);
+  if (!suggestions.length) {
+    box.innerHTML = "";
+    return;
+  }
+  box.innerHTML =
+    '<span class="query-suggestions-label">Aus deinem Lebenslauf:</span>' +
+    suggestions
+      .map(
+        (item) =>
+          `<button class="query-chip" type="button" title="${escapeAttr(item.reason || "")}" data-query="${escapeAttr(item.query)}">${escapeHtml(item.query)}</button>`
+      )
+      .join("");
+  box.querySelectorAll("[data-query]").forEach((chip) =>
+    chip.addEventListener("click", () => {
+      if (!els.queryInput) return;
+      els.queryInput.value = chip.dataset.query || "";
+      markActiveSuggestion();
+      els.queryInput.focus();
+    })
+  );
+  markActiveSuggestion();
+}
+
+function markActiveSuggestion() {
+  const current = (els.queryInput ? els.queryInput.value : "").trim().toLowerCase();
+  els.querySuggestions?.querySelectorAll("[data-query]").forEach((chip) =>
+    chip.classList.toggle("is-active", (chip.dataset.query || "").toLowerCase() === current)
+  );
+}
+if (els.queryInput) els.queryInput.addEventListener("input", markActiveSuggestion);
 function profileLabel(source) {
   if (source === "pending") return "CV importiert, Profil noch nicht erstellt";
   if (source === "none" || !lastProfileName) return "Kein Profil geladen — bitte Lebenslauf importieren (oder Demo laden).";

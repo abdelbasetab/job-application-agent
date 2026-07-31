@@ -368,6 +368,9 @@ def _build_handler(state: WebState) -> type[BaseHTTPRequestHandler]:
             if parsed.path == "/api/state":
                 self._send_json(_state_payload(state, user))
                 return
+            if parsed.path == "/api/search-suggestions":
+                self._send_json(_search_suggestions_payload(state, user))
+                return
             if parsed.path == "/api/applications":
                 params = parse_qs(parsed.query)
                 sess = state.session(user)
@@ -1291,6 +1294,23 @@ def _uploaded_cv_path(state: WebState, user: AuthUser | None = None) -> Path | N
 
 def _profile_dump(profile: UserProfile) -> dict[str, Any]:
     return profile.model_dump(mode="json")
+
+
+def _search_suggestions_payload(
+    state: WebState, user: AuthUser | None = None
+) -> dict[str, Any]:
+    """Search queries derived from the stored CV. Empty without a profile."""
+    from job_agent.tools.search_suggestions import search_suggestions
+
+    try:
+        profile = _require_profile(state, user)
+    except ValueError:
+        return {"ok": True, "profile_ready": False, "suggestions": []}
+    return {
+        "ok": True,
+        "profile_ready": True,
+        "suggestions": [item.as_dict() for item in search_suggestions(profile)],
+    }
 
 
 def _remember_profile(
