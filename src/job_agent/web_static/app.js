@@ -72,6 +72,7 @@ const els = {
   emailIdentityPanel: el("emailIdentityPanel"),
   emailAddressInput: el("emailAddressInput"),
   emailFromInput: el("emailFromInput"),
+  reviewEmailInput: el("reviewEmailInput"),
   smtpHostInput: el("smtpHostInput"),
   smtpPortInput: el("smtpPortInput"),
   smtpUserInput: el("smtpUserInput"),
@@ -125,8 +126,6 @@ const els = {
   copyBtn: el("copyBtn"),
   statusSelect: el("statusSelect"),
   notesInput: el("notesInput"),
-  emailRecipientInput: el("emailRecipientInput"),
-  recipientSuggestionsList: el("recipientSuggestionsList"),
   recipientHint: el("recipientHint"),
   attachCvInput: el("attachCvInput"),
   sendEmailBtn: el("sendEmailBtn"),
@@ -704,6 +703,7 @@ function fillEmailCredentialForm(identity = state.emailIdentity) {
   const useAccountEmails = identity.account_source === "local";
   if (els.emailAddressInput) els.emailAddressInput.value = email;
   if (els.emailFromInput) els.emailFromInput.value = cleanEmail(useAccountEmails ? account.email_from : "", email) || email;
+  if (els.reviewEmailInput) els.reviewEmailInput.value = account.review_email || "";
   if (els.smtpHostInput) els.smtpHostInput.value = account.smtp_host || "";
   if (els.smtpPortInput) els.smtpPortInput.value = account.smtp_port || 587;
   if (els.smtpUserInput) els.smtpUserInput.value = cleanEmail(useAccountEmails ? account.smtp_user : "", email) || email;
@@ -740,6 +740,7 @@ async function saveEmailCredentials() {
     const body = {
       email_address: els.emailAddressInput ? cleanEmail(els.emailAddressInput.value, fallbackEmail) : "",
       email_from: els.emailFromInput ? cleanEmail(els.emailFromInput.value, fallbackEmail) : "",
+      review_email: els.reviewEmailInput ? cleanEmail(els.reviewEmailInput.value) : "",
       smtp_host: els.smtpHostInput ? els.smtpHostInput.value : "",
       smtp_port: els.smtpPortInput ? Number(els.smtpPortInput.value || 587) : 587,
       smtp_user: els.smtpUserInput ? cleanEmail(els.smtpUserInput.value, fallbackEmail) : "",
@@ -1338,36 +1339,24 @@ function requirementsBlock(job) {
 }
 
 function applyRecipientSuggestions(job) {
-  if (els.recipientSuggestionsList) els.recipientSuggestionsList.innerHTML = "";
-  if (els.recipientHint) els.recipientHint.innerHTML = "";
+  // Purely informational: the app never sends here itself, this only tells
+  // the operator where they might forward the reviewed package themselves.
+  if (!els.recipientHint) return;
   if (!job) {
-    if (els.emailRecipientInput) els.emailRecipientInput.value = "";
+    els.recipientHint.innerHTML = "";
     return;
   }
   const suggestions = job.recipient_suggestions || [];
   const best = job.contact_email || (suggestions[0] && suggestions[0].email) || "";
-  if (els.emailRecipientInput) els.emailRecipientInput.value = best;
-  if (els.recipientSuggestionsList) {
-    els.recipientSuggestionsList.innerHTML = suggestions
-      .map((item) => `<option value="${escapeAttr(item.email)}">${Math.round(Number(item.confidence || 0) * 100)}% - ${escapeHtml(item.reason || "")}</option>`)
-      .join("");
-  }
-  if (!els.recipientHint) return;
   if (!suggestions.length) {
-    els.recipientHint.innerHTML = '<span class="muted-xs">Keine Bewerbungsadresse im Inserat erkannt. Bitte manuell eintragen oder Quelle oeffnen.</span>';
+    els.recipientHint.innerHTML = '<span class="muted-xs">Keine Bewerbungsadresse im Inserat erkannt.</span>';
     return;
   }
-  const chips = suggestions.slice(0, 4).map((item, index) => `
-    <button class="recipient-chip ${index === 0 ? "best" : ""}" type="button" data-recipient="${escapeAttr(item.email)}">
+  const chips = suggestions.slice(0, 4).map((item) => `
+    <span class="recipient-chip" title="${Math.round(Number(item.confidence || 0) * 100)}% - ${escapeAttr(item.reason || "")}">
       ${escapeHtml(item.email)}
-      <small>${Math.round(Number(item.confidence || 0) * 100)}%</small>
-    </button>`).join("");
-  els.recipientHint.innerHTML = `<div class="recipient-hint-head"><span>Empfaenger erkannt</span><strong>${escapeHtml(best || "-")}</strong></div><div class="recipient-chips">${chips}</div>`;
-  els.recipientHint.querySelectorAll("[data-recipient]").forEach((btn) =>
-    btn.addEventListener("click", () => {
-      if (els.emailRecipientInput) els.emailRecipientInput.value = btn.dataset.recipient || "";
-    })
-  );
+    </span>`).join("");
+  els.recipientHint.innerHTML = `<div class="recipient-hint-head"><span>Im Inserat erkannt</span><strong>${escapeHtml(best || "-")}</strong></div><div class="recipient-chips">${chips}</div><p class="muted-xs">Bitte nach Pruefung selbst dorthin weiterleiten.</p>`;
 }
 
 function renderDetail() {
@@ -1674,8 +1663,9 @@ async function recordFollowUp(jobId) {
 async function sendFollowUpEmail(jobId) {
   const item = (state.followUps || []).find((f) => f.job_id === jobId);
   const dryRun = state.config.email_dry_run !== false;
+  const reviewTarget = state.config.email_review_recipient || "deine Kontroll-E-Mail";
   if (!dryRun && !window.confirm(
-    `Follow-up jetzt wirklich an ${item?.contact_email || "den gewählten Empfänger"} senden?`
+    `Follow-up-Kontrollpaket jetzt wirklich an ${reviewTarget} senden (zur eigenen Pruefung)?`
   )) return;
   setBusy(true);
   try {
@@ -1685,7 +1675,6 @@ async function sendFollowUpEmail(jobId) {
         body: JSON.stringify({
           job_id: jobId,
           db_path: state.dbPath || els.dbPathInput.value,
-          recipient: item ? item.contact_email || "" : "",
           body_md: item ? item.suggested_email_md : "",
           confirm_real_send: !dryRun,
           idempotency_key: `web:follow-up:${jobId}`,
@@ -1696,8 +1685,8 @@ async function sendFollowUpEmail(jobId) {
     state.applications = data.applications || state.applications;
     const email = data.email || {};
     els.statusText.textContent = email.dry_run
-      ? `Follow-up Dry-run vorbereitet: ${email.recipient}`
-      : `Follow-up gesendet: ${email.recipient}`;
+      ? `Follow-up-Kontrollpaket Dry-run vorbereitet: ${email.recipient}`
+      : `Follow-up-Kontrollpaket gesendet an: ${email.recipient}`;
     await loadFollowUps();
     renderTracker();
   } catch (err) {
@@ -2101,12 +2090,12 @@ async function sendApplicationEmail() {
     return;
   }
   const dryRun = state.config.email_dry_run !== false;
-  const recipient = els.emailRecipientInput ? els.emailRecipientInput.value.trim() : "";
+  const reviewTarget = state.config.email_review_recipient || "deine Kontroll-E-Mail";
   if (!dryRun && !window.confirm(
-    `Bewerbung jetzt wirklich an ${recipient || "den erkannten Empfänger"} senden${els.attachCvInput?.checked ? " (mit CV-Anhang)" : ""}?`
+    `Kontrollpaket jetzt wirklich an ${reviewTarget} senden${els.attachCvInput?.checked ? " (mit CV-Anhang)" : ""}? Der Arbeitgeber wird dabei nicht kontaktiert.`
   )) return;
   setBusy(true);
-  if (els.statusText) els.statusText.textContent = "E-Mail wird gesendet ...";
+  if (els.statusText) els.statusText.textContent = "Kontrollpaket wird gesendet ...";
   try {
     const res = await fetch("/api/send-application-email", {
       method: "POST",
@@ -2114,21 +2103,20 @@ async function sendApplicationEmail() {
       body: JSON.stringify({
         db_path: state.dbPath || els.dbPathInput.value,
         job_id: job.id,
-        recipient,
         attach_cv: els.attachCvInput ? els.attachCvInput.checked : false,
         confirm_real_send: !dryRun,
         idempotency_key: `web:application:${job.id}`,
       }),
     });
     const data = await res.json();
-    if (!res.ok || !data.ok) throw new Error(data.error || "E-Mail konnte nicht gesendet werden");
+    if (!res.ok || !data.ok) throw new Error(data.error || "Kontrollpaket konnte nicht gesendet werden");
     state.applications = data.applications || state.applications;
     const updated = data.status || {};
     state.jobs = state.jobs.map((item) => (item.id === job.id ? { ...item, status: updated.status || item.status } : item));
     const email = data.email || {};
     const att = email.attachments && email.attachments.length ? ` (+ ${email.attachments.join(", ")})` : "";
-    els.statusText.textContent = (email.dry_run ? `Dry-run vorbereitet: ${email.recipient}` : `E-Mail gesendet: ${email.recipient}`) + att;
-    showToast((email.dry_run ? "E-Mail Dry-run vorbereitet" : "E-Mail gesendet") + `: ${email.recipient}${att}`, "ok");
+    els.statusText.textContent = (email.dry_run ? `Dry-run vorbereitet: ${email.recipient}` : `Kontrollpaket gesendet an: ${email.recipient}`) + att;
+    showToast((email.dry_run ? "Kontrollpaket Dry-run vorbereitet" : "Kontrollpaket gesendet") + `: ${email.recipient}${att}`, "ok");
     renderJobs(); renderDetail(); renderLetter(); renderTracker();
     refreshFollowUpBadge();
     await loadState({ silent: true });

@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from job_agent import web
 from job_agent.memory.store import Store
 from job_agent.schemas import ApplicationStatus, GeneratedApplication, JobPosting
@@ -111,13 +113,20 @@ def test_web_email_connection_test_uses_saved_account(
     assert seen == {"sender": "cv@example.de", "kind": "smtp", "timeout": 9.0}
 
 
-def test_follow_up_email_uses_job_contact_when_recipient_missing(
+def test_follow_up_email_targets_review_email_not_job_contact(
     tmp_path: Path, monkeypatch
 ) -> None:  # type: ignore[no-untyped-def]
+    """The app never emails an employer directly — even though the job
+    posting's description contains a detected contact address
+    (recruiting@example.de), the follow-up must go to the operator's own
+    configured review address instead."""
     monkeypatch.setattr(web, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(web, "DATA_DIR", tmp_path / "data")
     monkeypatch.setattr("job_agent.tools.email_delivery.settings.email_dry_run", True)
     monkeypatch.setattr("job_agent.tools.email_delivery.settings.email_demo_recipient", "")
+    monkeypatch.setattr(
+        "job_agent.tools.email_delivery.settings.email_review_recipient", "review@example.de"
+    )
     monkeypatch.setattr("job_agent.tools.email_delivery.settings.email_from", "sender@example.de")
     db_path = tmp_path / "data" / "web_email.db"
     store = Store(db_path)
@@ -144,5 +153,40 @@ def test_follow_up_email_uses_job_contact_when_recipient_missing(
     )
 
     assert out["ok"] is True
-    assert out["email"]["recipient"] == "recruiting@example.de"
+    assert out["email"]["recipient"] == "review@example.de"
     assert out["email"]["dry_run"] is True
+
+
+def test_follow_up_email_fails_without_review_email(
+    tmp_path: Path, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(web, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(web, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr("job_agent.tools.email_delivery.settings.email_dry_run", True)
+    monkeypatch.setattr("job_agent.tools.email_delivery.settings.email_demo_recipient", "")
+    monkeypatch.setattr("job_agent.tools.email_delivery.settings.email_review_recipient", "")
+    monkeypatch.setattr("job_agent.tools.email_delivery.settings.email_from", "sender@example.de")
+    db_path = tmp_path / "data" / "web_email2.db"
+    store = Store(db_path)
+    job = _job("web-email-2")
+    try:
+        store.save_profile(web.demo_profile(), source="test")
+        store.save_job(job)
+        store.save_application(
+            GeneratedApplication(job_id=job.id, cover_letter_md="Bewerbung", generated_at=date.today())
+        )
+        store.upsert_status(
+            ApplicationStatus(
+                job_id=job.id,
+                status="submitted",
+                submitted_at=datetime.now() - timedelta(days=10),
+            )
+        )
+    finally:
+        store.close()
+
+    with pytest.raises(ValueError, match="Kontroll-E-Mail"):
+        web._send_follow_up_email_from_payload(
+            {"db_path": str(db_path), "job_id": job.id},
+            WebState(),
+        )

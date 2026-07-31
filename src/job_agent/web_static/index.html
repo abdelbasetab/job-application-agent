@@ -9,42 +9,118 @@
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
-    <!-- ============================== AUTH ============================== -->
-    <section id="authView" class="auth">
-      <div class="auth-hero">
-        <div class="auth-logo"><span>JA</span></div>
-        <h1>Job Application Agent</h1>
-        <p class="auth-tagline">
-          Dein KI-gestützter Bewerbungs-Copilot für den deutschen Arbeitsmarkt —
-          finden, bewerten, Anschreiben, tracken.
-        </p>
-        <ul class="auth-points">
-          <li><span class="dot"></span> Erklärbares 1–5-Scoring &amp; Ghost-Job-Check</li>
-          <li><span class="dot"></span> CV-Import (PDF/OCR), CV-Check &amp; deutsche Anschreiben</li>
-          <li><span class="dot"></span> Tracker, Follow-up-Radar &amp; E-Mail-Versand</li>
-        </ul>
-      </div>
-      <div class="auth-card">
-        <div class="tabs" role="tablist" aria-label="Auth Modus">
-          <button id="loginTabBtn" class="tab is-active" type="button" role="tab">Login</button>
-          <button id="registerTabBtn" class="tab" type="button" role="tab">Registrieren</button>
+    <!-- ============================== AUTH + LANDING ============================== -->
+    <section id="authView">
+      <div class="auth">
+        <div class="auth-hero">
+          <div class="auth-logo"><span>JA</span></div>
+          <h1>Job Application Agent</h1>
+          <p class="auth-tagline">
+            Dein KI-gestützter Bewerbungs-Copilot für den deutschen Arbeitsmarkt —
+            finden, bewerten, Anschreiben, tracken.
+          </p>
+          <ul class="auth-points">
+            <li><span class="dot"></span> Erklärbares 1–5-Scoring &amp; Ghost-Job-Check</li>
+            <li><span class="dot"></span> CV-Import (PDF/OCR), CV-Check &amp; deutsche Anschreiben</li>
+            <li><span class="dot"></span> Tracker, Follow-up-Radar &amp; Kontrollpaket-Versand</li>
+          </ul>
+          <p class="auth-scroll-hint">↓ Mehr erfahren: wie es funktioniert &amp; wie du es ausprobierst</p>
         </div>
-        <form id="authForm" class="stack">
-          <label class="field">
-            <span>E-Mail</span>
-            <input id="authEmailInput" type="email" autocomplete="email" placeholder="du@example.com" required />
-          </label>
-          <label class="field">
-            <span>Passwort</span>
-            <input id="authPasswordInput" type="password" autocomplete="current-password" placeholder="••••••••" required />
-          </label>
-          <label id="authConfirmField" class="field is-hidden">
-            <span>Passwort bestätigen</span>
-            <input id="authConfirmInput" type="password" autocomplete="new-password" placeholder="••••••••" />
-          </label>
-          <button id="authSubmitBtn" class="btn btn-primary btn-block" type="submit">Einloggen</button>
-          <p id="authMessage" class="form-msg" role="alert"></p>
-        </form>
+        <div class="auth-card">
+          <div class="tabs" role="tablist" aria-label="Auth Modus">
+            <button id="loginTabBtn" class="tab is-active" type="button" role="tab">Login</button>
+            <button id="registerTabBtn" class="tab" type="button" role="tab">Registrieren</button>
+          </div>
+          <form id="authForm" class="stack">
+            <label class="field">
+              <span>E-Mail</span>
+              <input id="authEmailInput" type="email" autocomplete="email" placeholder="du@example.com" required />
+            </label>
+            <label class="field">
+              <span>Passwort</span>
+              <input id="authPasswordInput" type="password" autocomplete="current-password" placeholder="••••••••" required />
+            </label>
+            <label id="authConfirmField" class="field is-hidden">
+              <span>Passwort bestätigen</span>
+              <input id="authConfirmInput" type="password" autocomplete="new-password" placeholder="••••••••" />
+            </label>
+            <button id="authSubmitBtn" class="btn btn-primary btn-block" type="submit">Einloggen</button>
+            <p id="authMessage" class="form-msg" role="alert"></p>
+          </form>
+        </div>
+      </div>
+
+      <div class="landing">
+        <section class="landing-section">
+          <h2>Was macht dieses Projekt?</h2>
+          <p class="landing-lead">
+            Ein mehrbenutzerfähiges Agentensystem für den Bewerbungsablauf
+            <strong>finden&nbsp;→ bewerten&nbsp;→ Anschreiben entwerfen&nbsp;→ nachverfolgen</strong>.
+            Es kombiniert deterministische Regeln, optionale LLM-Agenten,
+            SQLite-Persistenz und diese Weboberfläche. Fünf spezialisierte
+            Agenten arbeiten als Pipeline zusammen:
+          </p>
+          <div class="landing-flow">
+            <div class="landing-step">
+              <span class="landing-step-num">1</span>
+              <h3>Profiler</h3>
+              <p>Liest deinen Lebenslauf (PDF, DOCX, TXT — auch Scans per OCR) und extrahiert ein typisiertes Profil: Skills, Erfahrung, Sprachen, Präferenzen.</p>
+            </div>
+            <div class="landing-step">
+              <span class="landing-step-num">2</span>
+              <h3>Scout</h3>
+              <p>Sucht Stellen über Adzuna und die BA-Jobsuche, dedupliziert quellenübergreifend. Einzelne Anzeigen von Indeed, StepStone &amp; Co. lassen sich manuell einfügen — bewusst ohne Portal-Login oder Scraper.</p>
+            </div>
+            <div class="landing-step">
+              <span class="landing-step-num">3</span>
+              <h3>Matcher</h3>
+              <p>Bewertet jede Stelle erklärbar: Muss-/Kann-Skills, Sprache, Ort, Arbeitsart, Gehalt. Jede Punktzahl ist in ihre Komponenten zerlegbar — keine Blackbox.</p>
+            </div>
+            <div class="landing-step">
+              <span class="landing-step-num">4</span>
+              <h3>Writer</h3>
+              <p>Entwirft ein deutsches Anschreiben ausschließlich aus belegten Profilfakten. Unsichere LLM-Ausgaben fallen auf eine geprüfte Vorlage zurück.</p>
+            </div>
+            <div class="landing-step">
+              <span class="landing-step-num">5</span>
+              <h3>Tracker</h3>
+              <p>Verfolgt Status und Historie jeder Bewerbung, erinnert an fällige Follow-ups, gleicht die Inbox ab und exportiert fertige PDF-Pakete.</p>
+            </div>
+          </div>
+        </section>
+
+        <div class="landing-cols">
+          <section class="landing-section">
+            <h2>Sicherheitsmodell</h2>
+            <ul class="landing-list">
+              <li>Das System <strong>bewirbt sich nie automatisch</strong>. Bewerbungs- und Follow-up-Mails gehen technisch ausschließlich an deine eigene Kontroll-E-Mail-Adresse — als Kontrollpaket mit Anschreiben-PDF und Lebenslauf. Die Weiterleitung an den Arbeitgeber bleibt eine bewusste, manuelle Entscheidung.</li>
+              <li>Versand ist <strong>dry-run-first</strong> und idempotent; SMTP nur über TLS, Inbox-Zugriff nur lesend.</li>
+              <li>Mehrbenutzerfähig mit isolierten Daten pro Account, CSRF-Schutz, Rate-Limits und AES-verschlüsselten Zugangsdaten.</li>
+            </ul>
+          </section>
+
+          <section class="landing-section">
+            <h2>Ausprobieren</h2>
+            <ol class="landing-list landing-list-ordered">
+              <li><strong>Registrieren</strong> — oben rechts ein Konto anlegen.</li>
+              <li><strong>Profil anlegen</strong> — eigenen Lebenslauf hochladen oder mit einem Klick das synthetische Demo-Profil wählen.</li>
+              <li><strong>Pipeline starten</strong> — der Offline-Demo-Modus liefert Beispieljobs ohne API-Schlüssel und ohne externe Aufrufe.</li>
+            </ol>
+            <p class="landing-note">Oder lokal mit Docker:</p>
+            <pre class="landing-code">git clone https://github.com/abdelbasetab/job-application-agent.git
+cd job-application-agent
+cp .env.example .env
+docker compose up --build -d</pre>
+          </section>
+        </div>
+
+        <footer class="landing-footer">
+          <a href="https://github.com/abdelbasetab/job-application-agent" target="_blank" rel="noopener">GitHub-Repository</a>
+          <a href="https://github.com/abdelbasetab/job-application-agent/blob/main/README.md" target="_blank" rel="noopener">README</a>
+          <a href="https://github.com/abdelbasetab/job-application-agent/blob/main/ARCHITECTURE.md" target="_blank" rel="noopener">Architektur</a>
+          <a href="https://github.com/abdelbasetab/job-application-agent/blob/main/SECURITY.md" target="_blank" rel="noopener">Sicherheit</a>
+          <span class="landing-license">MIT-Lizenz · Abdelbaset Abidi</span>
+        </footer>
       </div>
     </section>
 
@@ -292,10 +368,8 @@
                     <button id="saveStatusBtn" class="btn btn-ghost btn-sm" type="button">Status speichern</button>
                   </div>
                   <div class="track-row">
-                    <input id="emailRecipientInput" type="email" list="recipientSuggestionsList" placeholder="E-Mail aus der Anzeige oder manuell eintragen" />
-                    <datalist id="recipientSuggestionsList"></datalist>
                     <label class="check" title="Lebenslauf nur nach bewusster Auswahl anhängen"><input id="attachCvInput" type="checkbox" /><span>CV anhängen</span></label>
-                    <button id="sendEmailBtn" class="btn btn-primary btn-sm" type="button">E-Mail senden</button>
+                    <button id="sendEmailBtn" class="btn btn-primary btn-sm" type="button">Kontrollpaket an mich senden</button>
                     <button id="syncInboxBtn" class="btn btn-ghost btn-sm" type="button">Inbox prüfen</button>
                   </div>
                   <div id="recipientHint" class="recipient-hint"></div>
@@ -426,6 +500,7 @@
                 <div class="email-form-grid">
                   <label class="field"><span>Profil-/Konto-E-Mail</span><input id="emailAddressInput" type="email" placeholder="name@example.com" /></label>
                   <label class="field"><span>Absender</span><input id="emailFromInput" type="email" placeholder="name@example.com" /></label>
+                  <label class="field"><span>Kontroll-E-Mail (Bewerbungspakete gehen an dich)</span><input id="reviewEmailInput" type="email" placeholder="deine-eigene-adresse@example.com" /></label>
                   <label class="field"><span>SMTP Host</span><input id="smtpHostInput" type="text" placeholder="smtp.example.com" /></label>
                   <label class="field field-xs"><span>SMTP Port</span><input id="smtpPortInput" type="number" min="1" max="65535" value="587" /></label>
                   <label class="field"><span>SMTP User</span><input id="smtpUserInput" type="email" placeholder="name@example.com" /></label>

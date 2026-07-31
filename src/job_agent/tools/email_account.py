@@ -46,6 +46,10 @@ class EmailAccount:
     dry_run: bool = True
     sync_dry_run: bool = True
     auto_follow_up_send: bool = False
+    # Fixed self-review target for application/follow-up mail. The app never
+    # emails an employer directly — every outgoing message goes here so the
+    # operator can check it and forward it themselves.
+    review_email: str = ""
 
     @property
     def sender(self) -> str:
@@ -106,6 +110,7 @@ class EmailAccount:
             "dry_run": self.dry_run,
             "sync_dry_run": self.sync_dry_run,
             "auto_follow_up_send": self.auto_follow_up_send,
+            "review_email": self.review_email,
         }
 
     def secret_dict(self) -> dict[str, Any]:
@@ -142,6 +147,7 @@ def account_from_settings() -> EmailAccount:
         dry_run=settings.email_dry_run,
         sync_dry_run=settings.email_sync_dry_run,
         auto_follow_up_send=settings.email_auto_follow_up_send,
+        review_email=_clean_email(settings.email_review_recipient or ""),
     )
 
 
@@ -182,6 +188,7 @@ def account_from_mapping(data: dict[str, Any], fallback_email: str = "") -> Emai
         dry_run=_bool(data.get("dry_run"), True),
         sync_dry_run=_bool(data.get("sync_dry_run"), True),
         auto_follow_up_send=_bool(data.get("auto_follow_up_send"), False),
+        review_email=_clean_email(str(data.get("review_email") or "")),
     )
 
 
@@ -217,6 +224,11 @@ def email_identity_payload(
         warnings.append("Echter Versand ist aktiv, aber SMTP ist nicht vollstaendig.")
     if not resolved.imap_ready and not resolved.sync_dry_run:
         warnings.append("Echter Inbox-Sync ist aktiv, aber IMAP ist nicht vollstaendig.")
+    if not resolved.review_email:
+        warnings.append(
+            "Kontroll-E-Mail ist nicht gesetzt — Bewerbungs-/Follow-up-Mails "
+            "koennen erst verschickt werden, wenn eine Adresse hinterlegt ist."
+        )
     return {
         "profile_email": profile_email,
         "login_email": login_email,
@@ -229,6 +241,7 @@ def email_identity_payload(
         "email_dry_run": resolved.dry_run,
         "email_sync_dry_run": resolved.sync_dry_run,
         "auto_follow_up_send": resolved.auto_follow_up_send,
+        "review_email": resolved.review_email,
         "account_source": account_source,
         "account": account_from_mapping(resolved.secret_dict(), fallback_email=candidate).safe_dict(),
         "warnings": warnings,

@@ -45,8 +45,9 @@ def test_email_attaches_cv_when_requested(
         {"db_path": str(db_path), "job_id": job_id, "attach_cv": True}, state
     )
     assert out["ok"] is True
+    assert "anschreiben.pdf" in out["email"]["attachments"]
     assert "lebenslauf.pdf" in out["email"]["attachments"]
-    assert "Anhang: lebenslauf.pdf" in out["status"]["notes"]
+    assert "Anhang: anschreiben.pdf, lebenslauf.pdf" in out["status"]["notes"]
     cv = web._output_dir(None, job_id) / "lebenslauf.pdf"
     assert cv.read_bytes()[:4] == b"%PDF"
 
@@ -73,7 +74,7 @@ def test_email_attaches_uploaded_cv_when_available(
     cv = web._output_dir(None, job_id) / "lebenslauf.pdf"
 
     assert out["ok"] is True
-    assert out["email"]["attachments"] == ["lebenslauf.pdf"]
+    assert out["email"]["attachments"] == ["anschreiben.pdf", "lebenslauf.pdf"]
     assert cv.read_bytes() == b"%PDF-original-upload"
 
 
@@ -90,4 +91,4 @@ def test_email_has_no_attachment_by_default(
     out = web._send_application_email_from_payload(
         {"db_path": str(db_path), "job_id": job_id}, state
     )
-    assert out["email"]["attachments"] == []
+    assert out["email"]["attachments"] == ["anschreiben.pdf"]

@@ -107,6 +107,9 @@ class Settings:
     email_smtp_password: str | None = os.getenv("EMAIL_SMTP_PASSWORD") or None
     email_from: str | None = os.getenv("EMAIL_FROM") or None
     email_demo_recipient: str | None = os.getenv("EMAIL_DEMO_RECIPIENT") or None
+    # Fixed self-review target: application/follow-up mail never goes to the
+    # employer, it always goes here so the operator can check and forward it.
+    email_review_recipient: str | None = os.getenv("EMAIL_REVIEW_RECIPIENT") or None
     email_use_tls: bool = os.getenv("EMAIL_USE_TLS", "true").lower() in {
         "1",
         "true",

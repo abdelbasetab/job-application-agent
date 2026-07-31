@@ -41,7 +41,7 @@ def test_email_delivery_dry_run_does_not_send(monkeypatch) -> None:  # type: ign
     assert result["sent"] is False
     assert result["dry_run"] is True
     assert result["recipient"] == "demo@example.com"
-    assert result["subject"] == "Bewerbung: Werkstudent KI - Example GmbH"
+    assert result["subject"] == "Kontrolle: Bewerbung Werkstudent KI - Example GmbH"
     assert "ich bewerbe mich" in result["body_preview"]
     assert "Job Application Agent" not in result["body_preview"]
     assert "Quelle der Stelle" not in result["body_preview"]
@@ -82,19 +82,16 @@ def test_email_delivery_uses_smtp_when_enabled(monkeypatch) -> None:  # type: ig
     monkeypatch.setattr(email_delivery.settings, "email_smtp_user", "sender@example.com")
     monkeypatch.setattr(email_delivery.settings, "email_smtp_password", "app-password")
     monkeypatch.setattr(email_delivery.settings, "email_from", "sender@example.com")
+    monkeypatch.setattr(email_delivery.settings, "email_review_recipient", "review@example.com")
 
-    result = email_delivery.send_application_email(
-        _job(),
-        _application(),
-        recipient="hr@example.com",
-    )
+    result = email_delivery.send_application_email(_job(), _application())
 
     assert result["sent"] is True
     assert result["dry_run"] is False
     assert sent["host"] == "smtp.example.com"
     assert sent["tls"] is True
     assert sent["login"] == ("sender@example.com", "app-password")
-    assert sent["to"] == "hr@example.com"
+    assert sent["to"] == "review@example.com"
 
 
 def test_email_delivery_rejects_unencrypted_smtp(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -107,13 +104,12 @@ def test_email_delivery_rejects_unencrypted_smtp(monkeypatch) -> None:  # type: 
             "smtp_password": "app-password",
             "use_tls": False,
             "dry_run": False,
+            "review_email": "hr@example.com",
         }
     )
 
     with pytest.raises(ValueError, match="ohne TLS"):
-        email_delivery.send_application_email(
-            _job(), _application(), recipient="hr@example.com", account=account
-        )
+        email_delivery.send_application_email(_job(), _application(), account=account)
 
 
 def test_email_delivery_uses_implicit_tls_on_port_465(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -146,12 +142,11 @@ def test_email_delivery_uses_implicit_tls_on_port_465(monkeypatch) -> None:  # t
             "smtp_password": "app-password",
             "use_tls": True,
             "dry_run": False,
+            "review_email": "hr@example.com",
         }
     )
 
-    result = email_delivery.send_application_email(
-        _job(), _application(), recipient="hr@example.com", account=account
-    )
+    result = email_delivery.send_application_email(_job(), _application(), account=account)
 
     assert result["sent"] is True
     assert seen["port"] == 465

@@ -7,8 +7,11 @@ Anschreiben entwerfen → nachverfolgen**. Das Projekt kombiniert deterministisc
 Regeln, optionale LLM-Agenten, SQLite-Persistenz und eine lokale Weboberfläche.
 
 Wichtig: Das System verschickt standardmäßig keine echten E-Mails und bewirbt
-sich nie automatisch. LLM-Ausgaben und Empfänger müssen vor Verwendung geprüft
-werden.
+sich nie automatisch. Es kontaktiert auch nie direkt einen Arbeitgeber:
+Bewerbungs- und Follow-up-Mails gehen technisch immer an eine selbst
+konfigurierte Kontroll-E-Mail-Adresse (Jobdetails + Anschreiben als PDF +
+Lebenslauf), damit du sie prüfst und bei Bedarf selbst an den Arbeitgeber
+weiterleitest. LLM-Ausgaben müssen vor Verwendung geprüft werden.
 
 ## Funktionsumfang
 
@@ -198,6 +201,17 @@ verarbeitet. Inbox-Nachrichten werden per IMAP UID/Message-ID dedupliziert und
 ältere Antworten können einen fortgeschrittenen Status nicht zurückstufen.
 SMTP-Zugangsdaten werden ausschließlich über TLS verwendet: Port 465 nutzt
 implizites TLS, andere Ports STARTTLS; unverschlüsseltes SMTP wird abgelehnt.
+
+**Bewerbungs- und Follow-up-Mails gehen ausschließlich an die eigene
+Kontroll-E-Mail-Adresse** (Feld "Kontroll-E-Mail" in den Einstellungen) —
+niemals an eine aus dem Stellenangebot erkannte Arbeitgeberadresse. Das gilt
+auch für den E-Mail-Autopilot (automatischer Follow-up-Versand): Ohne
+gesetzte Kontroll-E-Mail wird kein Versand ausgelöst. Die im Inserat erkannte
+Adresse wird weiterhin angezeigt, rein informativ, damit du das geprüfte
+Kontrollpaket bei Bedarf selbst dorthin weiterleiten kannst. Ein Versand
+setzt den Bewerbungsstatus nicht automatisch auf "Eingereicht" — das bleibt
+eine bewusste manuelle Aktion, nachdem du selbst an den Arbeitgeber
+weitergeleitet hast.
 
 Die `.env`-Mailwerte gelten nur für lokale CLI-Nutzung. OAuth benötigt eine
 explizite externe Basis-URL, zum Beispiel:

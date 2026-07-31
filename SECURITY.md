@@ -31,7 +31,10 @@ und vorgeschlagene Abhilfe enthalten. Niemals echte CVs oder Tokens beilegen.
   nicht auflösbaren Hosts; erneute Prüfung jedes HTTP-Redirects.
 - E-Mail: Dry-run-Voreinstellung, explizite Echtversandbestätigung, persistente
   Outbox-Idempotenz, verpflichtendes SMTP-TLS/IMAPS mit Zertifikatsprüfung,
-  read-only/peek IMAP und monotone Statusübergänge.
+  read-only/peek IMAP und monotone Statusübergänge. Das Sendeziel ist im Code
+  fest auf die selbst konfigurierte Kontroll-E-Mail-Adresse begrenzt — ein aus
+  dem Stellenangebot erkannter Arbeitgeber-Kontakt ist nur eine
+  Anzeigeinformation und im Versandpfad technisch nicht erreichbar.
 - LLM: typisierte Antworten, Job-ID-Bindung, Evidenz-/Mengenprüfungen,
   Prompt-Injection-Grenzen und sichere deterministische Fallbacks.
 - Stellenportale: kein automatisierter Login, kein Credential-/Cookie-Import,

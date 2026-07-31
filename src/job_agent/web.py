@@ -1629,6 +1629,7 @@ def _config_payload(
         "embedding_model": settings.embedding_model,
         "email_dry_run": account.dry_run,
         "email_demo_recipient": settings.email_demo_recipient or "",
+        "email_review_recipient": account.review_email or "",
         "email_ready": account.dry_run or account.smtp_ready,
         "email_sync_dry_run": account.sync_dry_run,
         "email_sync_ready": account.imap_ready,
@@ -1640,7 +1641,7 @@ def _config_payload(
         "llm_agents_default": settings.enable_llm_agents,
         "chroma_default": settings.enable_chroma,
         "max_cv_upload_mb": MAX_CV_UPLOAD_BYTES // (1024 * 1024),
-        "default_demo_db": str(_resolve_db_path(DEFAULT_DEMO_DB)),
+        "default_demo_db": str(_resolve_db_path(DEFAULT_DEMO_DB, DATA_DIR)),
         "default_live_db": str(_resolve_db_path(settings.sqlite_path)),
     }
 
@@ -1914,6 +1915,7 @@ def _send_application_email_from_payload(
 ) -> dict[str, Any]:
     from job_agent.tools.email_account import normalize_email_address
     from job_agent.tools.email_delivery import send_application_email
+    from job_agent.tools.export import export_application
 
     sess = state.session(user)
     data_root = _user_data_dir(user["id"]) if user else None
@@ -1922,33 +1924,51 @@ def _send_application_email_from_payload(
     if not job_id:
         raise ValueError("job_id is required")
 
-    recipient = str(payload.get("recipient") or "").strip() or None
     attach_cv = bool(payload.get("attach_cv", False))
     db_path = _resolve_db_path(str(payload.get("db_path") or sess.last_db_path), data_root)
-
-    attachments: list[Path] = []
-    if attach_cv:
-        cv_path = _application_cv_path(state, user, data_root, job_id)
-        attachments = [cv_path]
 
     store = Store(db_path)
     try:
         job = store.get_job(job_id)
         application = store.get_application(job_id)
+        profile = _require_profile(state, user, store)
+        stored_match = store.get_match(job_id)
         if job is None:
             raise ValueError(f"Job '{job_id}' not found in store.")
         if application is None:
             raise ValueError(f"No drafted application exists for job '{job_id}'.")
 
-        # Prefer the address from the posting; the fixed config recipient is only
-        # a last-resort fallback (e.g. for offline demo jobs without an email).
-        recipient = recipient or _extract_contact_email(job) or None
-        if user is not None and not recipient:
-            raise ValueError("Bitte eine Empfaengeradresse angeben oder im Stellenangebot hinterlegen.")
         if not account.dry_run and payload.get("confirm_real_send") is not True:
             raise ValueError("Echter Versand muss unmittelbar vor dem Senden bestaetigt werden.")
+
+        with state.lock:
+            last_result = sess.last_result
+        match = stored_match
+        if last_result is not None:
+            match = next((m for m in last_result.matches if m.job_id == job_id), match)
+
+        # The review package always carries a fresh cover-letter PDF; the CV is
+        # only attached when requested (uploaded original, or rendered from the
+        # profile — export_application already picks the right one).
+        out_dir = _output_dir(data_root, job_id)
+        export_result = export_application(
+            job,
+            application,
+            profile,
+            out_dir=out_dir,
+            match=match,
+            cv_source_path=_uploaded_cv_path(state, user),
+        )
+        attachments: list[Path] = [out_dir / "anschreiben.pdf"]
+        if attach_cv:
+            cv_name = next(
+                (name for name in export_result.files if name.startswith("lebenslauf")), None
+            )
+            if cv_name:
+                attachments.append(out_dir / cv_name)
+
         normalized_recipient = normalize_email_address(
-            recipient or (settings.email_demo_recipient if account.dry_run else "") or ""
+            account.review_email or (settings.email_demo_recipient if account.dry_run else "") or ""
         )
         idempotency_key = _email_idempotency_key(
             "application",
@@ -1973,7 +1993,6 @@ def _send_application_email_from_payload(
             email_result = send_application_email(
                 job,
                 application,
-                recipient=recipient,
                 attachments=attachments,
                 account=account,
             )
@@ -1996,17 +2015,16 @@ def _send_application_email_from_payload(
             _safe_email_audit_payload(email_result, account_source),
             job_id=job_id,
         )
+        # A control-package send is not an interaction with the employer and
+        # must not flip the tracked status to "submitted" — only the operator,
+        # after actually forwarding it themselves, does that manually.
         existing = store.get_status(job_id)
         submitted_at = existing.submitted_at if existing else None
         status = existing.status if existing else "draft"
-        if email_result["sent"]:
-            status = "submitted"
-            if submitted_at is None:
-                submitted_at = datetime.now()
         event = (
-            f"E-Mail gesendet an {email_result['recipient']}."
+            f"Kontrollpaket per E-Mail an dich gesendet ({email_result['recipient']})."
             if email_result["sent"]
-            else f"E-Mail Dry-run vorbereitet an {email_result['recipient']}."
+            else f"Kontrollpaket Dry-run vorbereitet an {email_result['recipient']}."
         )
         if email_result.get("attachments"):
             event += f" Anhang: {', '.join(email_result['attachments'])}."
@@ -2185,7 +2203,6 @@ def _send_follow_up_email_from_payload(
     job_id = str(payload.get("job_id") or "").strip()
     if not job_id:
         raise ValueError("job_id is required")
-    recipient = str(payload.get("recipient") or "").strip() or None
     body_md = str(payload.get("body_md") or "").strip()
     db_path = _resolve_db_path(str(payload.get("db_path") or sess.last_db_path), data_root)
 
@@ -2202,13 +2219,10 @@ def _send_follow_up_email_from_payload(
             body_md = follow_up_email_draft(
                 job.title, job.company, status.submitted_at, candidate
             )
-        recipient = recipient or _extract_contact_email(job) or None
-        if user is not None and not recipient:
-            raise ValueError("Bitte eine Empfaengeradresse fuer das Follow-up angeben.")
         if not account.dry_run and payload.get("confirm_real_send") is not True:
             raise ValueError("Echter Versand muss unmittelbar vor dem Senden bestaetigt werden.")
         normalized_recipient = normalize_email_address(
-            recipient or (settings.email_demo_recipient if account.dry_run else "") or ""
+            account.review_email or (settings.email_demo_recipient if account.dry_run else "") or ""
         )
         idempotency_key = _email_idempotency_key(
             "follow_up",
@@ -2233,7 +2247,6 @@ def _send_follow_up_email_from_payload(
             email_result = send_follow_up_email(
                 job,
                 body_md,
-                recipient=recipient,
                 account=account,
             )
         except Exception as exc:
@@ -2256,9 +2269,9 @@ def _send_follow_up_email_from_payload(
             job_id=job_id,
         )
         event = (
-            f"Follow-up-E-Mail gesendet an {email_result['recipient']}."
+            f"Follow-up-Kontrollpaket per E-Mail an dich gesendet ({email_result['recipient']})."
             if email_result["sent"]
-            else f"Follow-up-E-Mail (Dry-run) vorbereitet an {email_result['recipient']}."
+            else f"Follow-up-Kontrollpaket Dry-run vorbereitet an {email_result['recipient']}."
         )
         # A preview is not an interaction with the employer and must not reset
         # the follow-up cadence.
@@ -2327,30 +2340,36 @@ def _run_email_autopilot_unlocked(
                 "updates": [],
                 "error": "IMAP nicht konfiguriert.",
             }
+        review_target = normalize_email_address(
+            account.review_email or (settings.email_demo_recipient if account.dry_run else "") or ""
+        )
         for item in due_follow_ups(store, days=days, candidate_name=candidate):
             job = store.get_job(item.job_id)
             if job is None:
                 continue
-            recipient = _extract_contact_email(job)
+            # Purely informational — where the operator would forward this to
+            # after review. Never used as a send target.
+            detected_employer_contact = _extract_contact_email(job)
             action: dict[str, Any] = {
                 "job_id": item.job_id,
                 "title": item.title,
                 "company": item.company,
-                "recipient": recipient,
+                "recipient": review_target,
+                "detected_employer_contact": detected_employer_contact,
                 "mode": "prepared",
                 "sent": False,
                 "dry_run": True,
             }
-            if not recipient:
+            if not review_target:
                 action["mode"] = "skipped"
-                action["reason"] = "Keine Bewerbungsadresse erkannt."
+                action["reason"] = "Keine Kontroll-E-Mail-Adresse hinterlegt."
                 actions.append(action)
                 continue
             if account.auto_follow_up_send:
                 idempotency_key = _email_idempotency_key(
                     "auto_follow_up",
                     item.job_id,
-                    normalize_email_address(recipient),
+                    review_target,
                     item.suggested_email_md,
                     item.last_activity.isoformat(),
                 )
@@ -2358,7 +2377,7 @@ def _run_email_autopilot_unlocked(
                     idempotency_key,
                     job_id=item.job_id,
                     event_type="auto_follow_up_email",
-                    recipient=normalize_email_address(recipient),
+                    recipient=review_target,
                     payload={"last_activity": item.last_activity.isoformat()},
                 ):
                     action["mode"] = "duplicate"
@@ -2370,7 +2389,6 @@ def _run_email_autopilot_unlocked(
                     email_result = send_follow_up_email(
                         job,
                         item.suggested_email_md,
-                        recipient=recipient,
                         account=account,
                     )
                     action.update(_safe_email_audit_payload(email_result, account_source))
@@ -2385,7 +2403,10 @@ def _run_email_autopilot_unlocked(
                         record_follow_up(
                             store,
                             item.job_id,
-                            note=f"Autopilot Follow-up gesendet an {email_result['recipient']}.",
+                            note=(
+                                "Autopilot-Kontrollpaket per E-Mail an dich gesendet "
+                                f"({email_result['recipient']})."
+                            ),
                         )
                 except Exception as exc:
                     if not delivery_finalized:
@@ -2998,27 +3019,6 @@ def _output_dir(data_root: Path | None, job_id: str) -> Path:
         raise ValueError("Invalid export path.")
     out.mkdir(parents=True, exist_ok=True)
     return out
-
-
-def _application_cv_path(
-    state: WebState,
-    user: AuthUser | None,
-    data_root: Path | None,
-    job_id: str,
-) -> Path:
-    uploaded = _uploaded_cv_path(state, user)
-    out_dir = _output_dir(data_root, job_id)
-    if uploaded is not None:
-        suffix = uploaded.suffix.lower()
-        target = out_dir / ("lebenslauf.pdf" if suffix == ".pdf" else f"lebenslauf{suffix}")
-        shutil.copyfile(uploaded, target)
-        return target
-
-    from job_agent.tools.export import _render_cv
-
-    cv_path = out_dir / "lebenslauf.pdf"
-    _render_cv(cv_path, _require_profile(state, user))
-    return cv_path
 
 
 def _export_application_from_payload(

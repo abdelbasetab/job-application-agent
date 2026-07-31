@@ -30,7 +30,9 @@ und verschwinden beim Neustart.
 
 - konfigurierter LLM-/Embedding-Anbieter: CV- oder Jobfakten und Prompts,
 - Adzuna und BA-Jobsuche: Suchbegriffe und technische Requestdaten,
-- SMTP-/IMAP-/OAuth-Anbieter: E-Mail-Inhalte, Empfänger und Kontometadaten,
+- SMTP-/IMAP-/OAuth-Anbieter: E-Mail-Inhalte und Kontometadaten. Empfänger ist
+  dabei stets die selbst konfigurierte Kontroll-E-Mail-Adresse des Betreibers,
+  nie ein Arbeitgeber,
 - öffentliche Zielseiten bei optionaler Detailanreicherung oder Liveness-Prüfung:
   IP-Adresse und Request-Metadaten.
 

@@ -1,9 +1,12 @@
 """Safe SMTP delivery for applications and follow-ups.
 
-Dry-run is an account policy, not a process-global policy for web users. The
-caller reserves an idempotency key in :mod:`job_agent.memory.store` before
-entering this module; this module is intentionally limited to constructing and
-delivering exactly one message.
+The app never emails an employer directly. Every message this module sends —
+application or follow-up — goes to the operator's own configured
+``review_email`` address, so a human checks the content and attachments and
+forwards them manually. Dry-run is an account policy, not a process-global
+policy for web users. The caller reserves an idempotency key in
+:mod:`job_agent.memory.store` before entering this module; this module is
+intentionally limited to constructing and delivering exactly one message.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ from job_agent.tools.email_account import (
     account_from_settings,
     normalize_email_address,
 )
+from job_agent.tools.recipient_extraction import best_recipient
 from job_agent.utils.config import settings
 from job_agent.utils.network_security import validate_public_host
 
@@ -30,14 +34,13 @@ from job_agent.utils.network_security import validate_public_host
 def send_follow_up_email(
     job: JobPosting,
     body_md: str,
-    recipient: str | None = None,
     account: EmailAccount | None = None,
 ) -> dict[str, Any]:
     resolved = account or account_from_settings()
-    target = _recipient(recipient, resolved.dry_run)
+    target = _review_target(resolved)
     sender = _sender(resolved)
-    subject = _safe_subject(f"Nachfrage zu meiner Bewerbung: {job.title} - {job.company}")
-    body = _markdown_to_plain(body_md)
+    subject = _safe_subject(f"Kontrolle: Nachfrage zu {job.title} - {job.company}")
+    body = _review_note(job) + "\n\n" + _markdown_to_plain(body_md)
     message = _build_message(sender, target, subject, body, [])
     return _deliver(message, resolved, target, subject, body, [])
 
@@ -45,15 +48,14 @@ def send_follow_up_email(
 def send_application_email(
     job: JobPosting,
     application: GeneratedApplication,
-    recipient: str | None = None,
     attachments: list[Path] | None = None,
     account: EmailAccount | None = None,
 ) -> dict[str, Any]:
     resolved = account or account_from_settings()
-    target = _recipient(recipient, resolved.dry_run)
+    target = _review_target(resolved)
     sender = _sender(resolved)
     files = [Path(path) for path in (attachments or []) if Path(path).is_file()]
-    subject = _safe_subject(f"Bewerbung: {job.title} - {job.company}")
+    subject = _safe_subject(f"Kontrolle: Bewerbung {job.title} - {job.company}")
     body = _email_body(job, application)
     message = _build_message(sender, target, subject, body, files)
     return _deliver(message, resolved, target, subject, body, files)
@@ -118,13 +120,18 @@ def _deliver(
     }
 
 
-def _recipient(value: str | None, dry_run: bool) -> str:
-    candidate = value or (settings.email_demo_recipient if dry_run else None) or ""
+def _review_target(account: EmailAccount) -> str:
+    """The one address this module is allowed to send to: the operator's own."""
+    candidate = account.review_email or (
+        settings.email_demo_recipient if account.dry_run else ""
+    ) or ""
     cleaned = normalize_email_address(candidate)
     if not cleaned:
-        if dry_run:
-            raise ValueError("Keine gueltige Demo- oder Empfaengeradresse angegeben.")
-        raise ValueError("Fuer echten Versand ist eine gueltige Empfaengeradresse erforderlich.")
+        raise ValueError(
+            "Keine Kontroll-E-Mail-Adresse hinterlegt. Bitte zuerst in den "
+            "Einstellungen eine eigene Adresse eintragen, an die "
+            "Bewerbungs-Kontrollpakete gehen sollen."
+        )
     return cleaned
 
 
@@ -192,5 +199,20 @@ def _markdown_to_plain(value: str) -> str:
 
 
 def _email_body(job: JobPosting, application: GeneratedApplication) -> str:
-    del job  # The external job URL and automation provenance do not belong in employer mail.
-    return _markdown_to_plain(application.cover_letter_md)
+    return _review_note(job) + "\n\n---\n\n" + _markdown_to_plain(application.cover_letter_md)
+
+
+def _review_note(job: JobPosting) -> str:
+    """Job context for the operator's own inbox — never sent to an employer."""
+    detected = best_recipient(job)
+    lines = [
+        "Dies ist ein Kontrollpaket fuer dich selbst, keine Bewerbung an den Arbeitgeber.",
+        "Bitte pruefen und bei Bedarf selbst an den Arbeitgeber weiterleiten.",
+        "",
+        f"Stelle: {job.title}",
+        f"Unternehmen: {job.company}",
+        f"Anzeige: {job.url}",
+    ]
+    if detected:
+        lines.append(f"Im Inserat erkannte Bewerbungsadresse: {detected}")
+    return "\n".join(lines)
