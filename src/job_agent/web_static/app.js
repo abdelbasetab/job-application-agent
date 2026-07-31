@@ -2139,8 +2139,14 @@ async function sendApplicationEmail() {
     showToast('Noch kein Anschreiben vorhanden. Bitte zuerst "Entwurf erstellen" klicken.');
     return;
   }
-  const dryRun = state.config.email_dry_run !== false;
+  await loadConfig();
+  let dryRun = state.config.email_dry_run !== false;
   const reviewTarget = state.config.email_review_recipient || "deine Kontroll-E-Mail";
+  if (dryRun) {
+    const enabled = await enableRealEmailSendForCurrentAccount(reviewTarget);
+    if (!enabled) return;
+    dryRun = false;
+  }
   if (!dryRun && !window.confirm(
     `Kontrollpaket jetzt wirklich an ${reviewTarget} senden${els.attachCvInput?.checked ? " (mit CV-Anhang)" : ""}? Der Arbeitgeber wird dabei nicht kontaktiert.`
   )) return;
@@ -2155,7 +2161,7 @@ async function sendApplicationEmail() {
         job_id: job.id,
         attach_cv: els.attachCvInput ? els.attachCvInput.checked : false,
         confirm_real_send: !dryRun,
-        idempotency_key: `web:application:${job.id}`,
+        idempotency_key: `web:application:${job.id}:real`,
       }),
     });
     const data = await res.json();
@@ -2175,6 +2181,58 @@ async function sendApplicationEmail() {
   } finally {
     setBusy(false);
   }
+}
+
+async function enableRealEmailSendForCurrentAccount(reviewTarget) {
+  const identity = state.config.email_identity || {};
+  const account = identity.account || {};
+  if (!account.smtp_ready) {
+    showToast("SMTP ist noch nicht vollstaendig konfiguriert. Bitte zuerst in Einstellungen speichern und SMTP testen.");
+    return false;
+  }
+  if (!state.config.email_review_recipient) {
+    showToast("Kontroll-E-Mail fehlt. Bitte in Einstellungen deine eigene Zieladresse eintragen.");
+    return false;
+  }
+  if (!window.confirm(
+    `Dry-run ist aktiv. Jetzt fuer dieses Konto deaktivieren und das Kontrollpaket wirklich an ${reviewTarget} senden?`
+  )) return false;
+
+  const body = {
+    email_address: account.email_address || identity.candidate_email || "",
+    email_from: account.email_from || identity.sender || "",
+    review_email: account.review_email || state.config.email_review_recipient || "",
+    smtp_host: account.smtp_host || "",
+    smtp_port: account.smtp_port || 587,
+    smtp_user: account.smtp_user || identity.smtp_user || "",
+    smtp_password: "",
+    imap_host: account.imap_host || "",
+    imap_port: account.imap_port || 993,
+    imap_user: account.imap_user || identity.imap_user || "",
+    imap_password: "",
+    imap_folder: account.imap_folder || "INBOX",
+    use_tls: account.use_tls !== false,
+    dry_run: false,
+    sync_dry_run: account.sync_dry_run !== false,
+    auto_follow_up_send: account.auto_follow_up_send === true,
+  };
+  const res = await fetch("/api/email-credentials", {
+    method: "POST",
+    headers: jsonHeaders(),
+    body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  if (!res.ok || !data.ok) {
+    showToast(data.error || "Dry-run konnte nicht deaktiviert werden.");
+    return false;
+  }
+  renderEmailIdentity(data.email_identity);
+  await loadConfig();
+  if (state.config.email_dry_run !== false) {
+    showToast("Dry-run ist weiterhin aktiv. Bitte Einstellungen pruefen.");
+    return false;
+  }
+  return true;
 }
 async function syncInboxStatus() {
   setBusy(true);
