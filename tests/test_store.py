@@ -118,6 +118,26 @@ def test_email_inbox_and_outbox_are_idempotent(tmp_path: Path) -> None:
             recipient="hr@example.invalid",
             payload={},
         )
+        assert store.reserve_email(
+            "send-2",
+            job_id="job-1",
+            event_type="application",
+            recipient="hr@example.invalid",
+            payload={"subject": "Dry-run"},
+        )
+        store.finish_email("send-2", state="dry_run", message_id="msg-dry-run")
+        assert store.reserve_email(
+            "send-2",
+            job_id="job-1",
+            event_type="application",
+            recipient="hr@example.invalid",
+            payload={"subject": "Real send"},
+            allow_retry_from_dry_run=True,
+        )
+        entry = store.email_outbox_entry("send-2")
+        assert entry is not None
+        assert entry["state"] == "pending"
+        assert entry["payload"]["subject"] == "Real send"
         store.finish_email("send-1", state="sent", message_id="message-1")
         assert store.email_outbox_entry("send-1")["state"] == "sent"  # type: ignore[index]
     finally:

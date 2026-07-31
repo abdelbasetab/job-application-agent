@@ -2003,6 +2003,7 @@ def _send_application_email_from_payload(
             event_type="application_email",
             recipient=normalized_recipient,
             payload={"attachments": [path.name for path in attachments]},
+            allow_retry_from_dry_run=not account.dry_run,
         ):
             previous = store.email_outbox_entry(idempotency_key) or {}
             raise ValueError(
@@ -2257,6 +2258,7 @@ def _send_follow_up_email_from_payload(
             event_type="follow_up_email",
             recipient=normalized_recipient,
             payload={},
+            allow_retry_from_dry_run=not account.dry_run,
         ):
             previous = store.email_outbox_entry(idempotency_key) or {}
             raise ValueError(
@@ -2399,6 +2401,7 @@ def _run_email_autopilot_unlocked(
                     event_type="auto_follow_up_email",
                     recipient=review_target,
                     payload={"last_activity": item.last_activity.isoformat()},
+                    allow_retry_from_dry_run=not account.dry_run,
                 ):
                     action["mode"] = "duplicate"
                     action["reason"] = "Dieser Follow-up-Zyklus wurde bereits verarbeitet."

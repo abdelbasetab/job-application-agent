@@ -550,6 +550,7 @@ class Store:
         event_type: str,
         recipient: str,
         payload: dict[str, Any],
+        allow_retry_from_dry_run: bool = False,
     ) -> bool:
         """Atomically reserve a delivery key before talking to SMTP."""
         now = datetime.now().isoformat()
@@ -569,6 +570,33 @@ class Store:
                     now,
                     now,
                     json.dumps(payload, ensure_ascii=False),
+                ),
+            )
+            if cursor.rowcount == 1:
+                return True
+            if not allow_retry_from_dry_run:
+                return False
+            row = self._conn.execute(
+                "SELECT state FROM email_outbox WHERE idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+            if row is None or str(row[0]) != "dry_run":
+                return False
+            cursor = self._conn.execute(
+                """
+                UPDATE email_outbox
+                SET job_id = ?, event_type = ?, recipient = ?, state = 'pending',
+                    updated_at = ?, message_id = NULL, error = ?, payload = ?
+                WHERE idempotency_key = ? AND state = 'dry_run'
+                """,
+                (
+                    job_id,
+                    event_type,
+                    recipient,
+                    now,
+                    None,
+                    json.dumps(payload, ensure_ascii=False),
+                    idempotency_key,
                 ),
             )
         return cursor.rowcount == 1

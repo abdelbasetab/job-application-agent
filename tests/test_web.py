@@ -317,6 +317,95 @@ def test_send_application_email_dry_run_records_note_without_submitting(
     assert "Dry-run vorbereitet" in out["status"]["notes"]
 
 
+def test_send_application_email_can_retry_after_dry_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(web, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(web, "DATA_DIR", tmp_path / "data")
+    db_path = tmp_path / "data" / "retry_after_dry_run.db"
+    state = WebState()
+
+    response = _run_pipeline_from_payload(
+        {
+            "demo": True,
+            "limit": 1,
+            "threshold": 0.5,
+            "draft_all": True,
+            "db_path": str(db_path),
+            "reset_db": True,
+            "force_demo_profile": True,
+        },
+        state,
+    )
+    job_id = response["jobs"][0]["id"]
+
+    monkeypatch.setattr(web.settings, "email_dry_run", True)
+    monkeypatch.setattr(web.settings, "email_demo_recipient", "demo@example.com")
+    monkeypatch.setattr(web.settings, "email_from", "sender@example.com")
+    first = web._send_application_email_from_payload({"db_path": str(db_path), "job_id": job_id}, state)
+    assert first["ok"] is True
+    assert first["email"]["dry_run"] is True
+
+    class FakeSMTP:
+        def __init__(self, host: str, port: int, timeout: int) -> None:
+            self.host = host
+            self.port = port
+            self.timeout = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def ehlo(self) -> None:
+            return None
+
+        def starttls(self, context=None) -> None:  # type: ignore[no-untyped-def]
+            return None
+
+        def login(self, user: str, password: str) -> None:
+            self.login_user = user
+            self.login_password = password
+
+        def noop(self) -> None:
+            return None
+
+        def send_message(self, message) -> None:  # type: ignore[no-untyped-def]
+            self.message = message
+
+    monkeypatch.setattr(web.settings, "email_dry_run", False)
+    monkeypatch.setattr(web.settings, "email_smtp_host", "smtp.example.com")
+    monkeypatch.setattr(web.settings, "email_smtp_port", 587)
+    monkeypatch.setattr(web.settings, "email_use_tls", True)
+    monkeypatch.setattr(web.settings, "email_smtp_user", "sender@example.com")
+    monkeypatch.setattr(web.settings, "email_smtp_password", "app-password")
+    monkeypatch.setattr(web.settings, "email_review_recipient", "review@example.com")
+    monkeypatch.setattr("job_agent.tools.email_delivery.validate_public_host", lambda *_args, **_kwargs: "ok")
+    monkeypatch.setattr("job_agent.tools.email_delivery.smtplib.SMTP", FakeSMTP)
+
+    second = web._send_application_email_from_payload(
+        {
+            "db_path": str(db_path),
+            "job_id": job_id,
+            "confirm_real_send": True,
+        },
+        state,
+    )
+
+    assert second["ok"] is True
+    assert second["email"]["sent"] is True
+    assert second["email"]["dry_run"] is False
+
+    store = Store(db_path)
+    try:
+        entry = store.email_outbox_entry(second["email"]["idempotency_key"])
+        assert entry is not None
+        assert entry["state"] == "sent"
+    finally:
+        store.close()
+
+
 def test_sync_email_status_endpoint_returns_updates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
